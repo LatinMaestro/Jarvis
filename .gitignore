@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Local/editor
+.DS_Store
+.vscode/
+.idea/
+
+# Replit-only / temporary
+.replit
+replit.nix
+.local/
+.cache/
+.agents/
+attached_assets/
+
+# SQLite runtime sidecars / local backups
+*.db-shm
+*.db-wal
+*.sqlite-shm
+*.sqlite-wal
+*.bak

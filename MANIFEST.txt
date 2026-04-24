@@ -1,0 +1,32 @@
+Marvel Rivals Railway Deployment Pack
+Generated from the complete Replit export supplied in this chat.
+
+Files included:
+- main.py
+- marvel_rivals_stats.db
+- requirements.txt
+- runtime.txt
+- .python-version
+- railway.toml
+- .env.example
+- .gitignore
+- README_RAILWAY_SETUP.md
+- CHECKLIST.md
+
+Validation performed:
+- python -S -m py_compile main.py: OK
+- SQLite PRAGMA integrity_check: ok
+- DB counts after WAL checkpoint:
+  - game_stats: 3356
+  - match_imports: 480
+  - mr_match_meta: 480
+  - mr_roster: 16
+  - hero_cache: 51
+  - mr_auto_import_scan_state: 19
+
+Excluded:
+- Replit system files and logs
+- .git and .local folders
+- old duplicate source files and nested zip files
+- web keep-alive files not required by Railway
+- SQLite WAL/SHM sidecars after checkpointing
