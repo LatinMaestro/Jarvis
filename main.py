@@ -2794,6 +2794,113 @@ def _parse_is_win_flag(raw) -> int | None:
 
     return None
 
+def _int_or_none(value):
+    """Safely convert a value to int, returning None if it cannot be converted."""
+    try:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str):
+            value = value.strip()
+            if value == "":
+                return None
+            return int(float(value))
+    except Exception:
+        return None
+    return None
+
+
+def _extract_team_camp_from_player(p: dict) -> int | None:
+    """
+    Returns a usable team/camp value for a match player.
+
+    Primary source:
+      - API camp/team fields
+
+    Fallback:
+      - If camp is missing, infer side from is_win:
+          winners = camp 1
+          losers  = camp 0
+
+    This fixes cases where match details have valid win/loss data but do not
+    expose a reliable camp value for the auto-import roster/team gate.
+    """
+    if not isinstance(p, dict):
+        return None
+
+    # Direct API keys seen/likely across payload variants.
+    direct_keys = (
+        "camp",
+        "camp_id",
+        "team",
+        "team_id",
+        "side",
+        "side_id",
+        "battle_side",
+        "player_side",
+    )
+
+    for key in direct_keys:
+        camp = _int_or_none(p.get(key))
+        if camp is not None:
+            return camp
+
+    # Some APIs place extra fields under dynamic_fields.
+    dyn = p.get("dynamic_fields") or {}
+    if isinstance(dyn, dict):
+        for key in direct_keys:
+            camp = _int_or_none(dyn.get(key))
+            if camp is not None:
+                return camp
+
+    # Some payloads may use nested team/camp dictionaries.
+    for parent_key in ("team", "camp", "side"):
+        parent = p.get(parent_key)
+        if isinstance(parent, dict):
+            for child_key in ("id", "team_id", "camp", "camp_id", "side", "side_id"):
+                camp = _int_or_none(parent.get(child_key))
+                if camp is not None:
+                    return camp
+
+    # Final fallback: infer side from result.
+    # This is acceptable for non-draw matches because all winners are on one side
+    # and all losers are on the other side.
+    result = _parse_is_win_flag(p.get("is_win"))
+    if result == 1:
+        return 1
+    if result == 0:
+        return 0
+
+    return None
+
+
+def _normalise_match_payload_team_fields(payload: dict) -> dict:
+    """
+    Ensures each match player has a usable p['camp'] where possible.
+
+    This mutates and returns the same payload object. It is intentionally called
+    before the min-human gate and before import so downstream stats commands also
+    get a usable camp value.
+    """
+    md = (payload or {}).get("match_details") or {}
+    players = md.get("match_players") or []
+
+    if not isinstance(players, list):
+        return payload
+
+    for p in players:
+        if not isinstance(p, dict):
+            continue
+
+        camp = _extract_team_camp_from_player(p)
+        if camp is not None:
+            p["camp"] = camp
+
+    return payload
+
 
 def _is_draw_match(payload: dict) -> bool:
     """Returns True when the payload clearly represents a draw/tie.
@@ -2904,14 +3011,20 @@ def _passes_min_humans_each_team(payload: dict) -> bool:
     - Only import games with roster participation:
         * at least MIN_ROSTER_HUMANS_TOTAL rostered players overall
         * at least MIN_ROSTER_HUMANS_PER_TEAM rostered players on each of the 2 teams
+
+    Update:
+    - Normalises missing/unreliable camp values before checking.
+    - Falls back to win/loss side where camp is missing.
     """
+    payload = _normalise_match_payload_team_fields(payload)
+
     roster_uids, roster_names_norm = _roster_uids_and_names()
     if not roster_uids and not roster_names_norm:
-        # Without roster, cannot enforce reliably.
         return False
 
     md = (payload or {}).get("match_details") or {}
     players = md.get("match_players") or []
+
     if not isinstance(players, list):
         players = []
 
@@ -2921,40 +3034,43 @@ def _passes_min_humans_each_team(payload: dict) -> bool:
     for p in players:
         if not isinstance(p, dict):
             continue
+
         if _is_bot_player(p):
             continue
 
         uid = p.get("player_uid")
-        name = (p.get("nick_name") or p.get("nickname") or p.get("player_name")
-                or p.get("player") or "")
+        name = (
+            p.get("nick_name")
+            or p.get("nickname")
+            or p.get("player_name")
+            or p.get("player")
+            or ""
+        )
         name = str(name).strip() if name else None
 
         if not _is_roster_human(uid, name, roster_uids, roster_names_norm):
             continue
 
-        camp = p.get("camp")
+        camp = _extract_team_camp_from_player(p)
         if camp is None:
             continue
-        try:
-            camp_i = int(camp)
-        except Exception:
-            continue
 
-        roster_humans_by_team[camp_i] += 1
+        roster_humans_by_team[int(camp)] += 1
         roster_humans_total += 1
 
-    # Need exactly two teams represented by rostered players
     teams = [t for t, ct in roster_humans_by_team.items() if ct > 0]
+
+    # Need rostered humans represented on exactly two sides.
     if len(teams) != 2:
         return False
 
-    # Total rostered players requirement
     if roster_humans_total < int(MIN_ROSTER_HUMANS_TOTAL):
         return False
 
-    # Minimum rostered players per team requirement
-    return all(roster_humans_by_team[t] >= int(MIN_ROSTER_HUMANS_PER_TEAM)
-               for t in teams)
+    return all(
+        roster_humans_by_team[t] >= int(MIN_ROSTER_HUMANS_PER_TEAM)
+        for t in teams
+    )
 
 
 # -------------------------
@@ -3037,6 +3153,10 @@ async def _import_match_into_season(
     """
     ensure_mr_api_tables()
     ensure_auto_import_tables()
+
+    # Ensure team/camp values are usable before writing mr_player_match,
+    # game_stats, teammate matrices, low-team stats, etc.
+    payload = _normalise_match_payload_team_fields(payload)
 
     season_id = int(season_id)
     game_label = _next_game_label_for_season(season_id)
@@ -23824,224 +23944,6 @@ try:
     globals()["_get_all_players"] = _get_all_players_roster_first
 except Exception:
     pass
-
-# =====================================================================================
-# SEASON-ONLY PATCH: 
-# Paste near the end of the file, ABOVE: if __name__ == "__main__":
-# Delete this whole block when you want to remove the feature.
-# =====================================================================================
-
-LATIN_TEAM_DUELIST_PATCH_ENABLED = True
-
-LATIN_TEAM_DUELIST_PATCH_LATIN_UID = 64511620          # 064511620
-LATIN_TEAM_DUELIST_PATCH_HAROLD_UID = 903452137        # xX_Harold_Xx
-LATIN_TEAM_DUELIST_PATCH_FAND_UID = 2092848953         # Fandangleberry
-
-LATIN_TEAM_DUELIST_PATCH_SINGLE_KEEP_OFF_DUELIST_CHANCE = 1.00
-
-_LATIN_TEAM_DUELIST_PATCH_ROLE_EMOJIS = ("🛡️", "⚔️", "✚")
-
-
-def _latin_team_duelist_patch_pick_non_duelist(pkey: str, session) -> str:
-    """
-    Pick a non-Duelist replacement ban while staying as close as possible to the
-    existing role-ban maths for that player.
-    """
-    dbg = {}
-    try:
-        dbg = (getattr(session, "last_debug", None) or {}).get("restricted_roles_math", {}) or {}
-    except Exception:
-        dbg = {}
-
-    shares = {}
-    try:
-        shares = dict((dbg.get(pkey) or {}).get("shares") or {})
-    except Exception:
-        shares = {}
-
-    candidates = ["Vanguard", "Strategist"]
-    weights = [max(0.0, float(shares.get(r, 0.0) or 0.0)) for r in candidates]
-
-    if sum(weights) > 0.0:
-        try:
-            return random.choices(candidates, weights=weights, k=1)[0]
-        except Exception:
-            pass
-
-    return random.choice(candidates)
-
-
-def _latin_team_duelist_patch_preserve_extra_emojis(existing_inside: str) -> str:
-    """
-    Keeps any extra non-role emoji already inside the brackets, e.g. a seasonal 💻 patch.
-    """
-    s = str(existing_inside or "")
-    for emo in _LATIN_TEAM_DUELIST_PATCH_ROLE_EMOJIS:
-        s = s.replace(emo, "")
-    return s.replace(" ", "")
-
-
-def _latin_team_duelist_patch_replace_player_restriction(
-    content: str,
-    display_name: str,
-    new_role: str,
-) -> str:
-    """
-    Replace:
-      DisplayName (⚔️)
-    with:
-      DisplayName (🛡️)
-    while preserving any extra suffix emoji already in the brackets.
-    """
-    if not content or not display_name:
-        return content
-
-    pattern = rf"{re.escape(display_name)} \(([^)]*)\)"
-
-    def _repl(match):
-        inside = match.group(1) or ""
-        extras = _latin_team_duelist_patch_preserve_extra_emojis(inside)
-        return f"{display_name} ({_nt_role_emoji(new_role)}{extras})"
-
-    new_content, _ = re.subn(pattern, _repl, content, count=1)
-    return new_content
-
-
-async def _latin_team_duelist_patch_apply(channel, key: tuple[int, int]):
-    """
-    Hidden post-roll patch:
-      - If both Harold and Fandangleberry are on LatinMaestro's team, ensure at least
-        one of them is NOT on a Duelist ban.
-      - If only one of them is on LatinMaestro's team, there is an 80% chance that
-        they will NOT be on a Duelist ban.
-      - If neither is on LatinMaestro's team, do nothing.
-
-    This deliberately runs AFTER the real next-teams roll so the existing team
-    generation calculation stays untouched.
-    """
-    if not LATIN_TEAM_DUELIST_PATCH_ENABLED:
-        return
-
-    session = SESSION_STATES.get(key)
-    if not session:
-        return
-
-    pending = getattr(session, "pending_roll_data", None)
-    if not isinstance(pending, dict) or not pending:
-        return
-
-    restricted_roles = dict(pending.get("restricted_roles") or {})
-    if not restricted_roles:
-        return
-
-    team_a = set(pending.get("team_a") or [])
-    team_b = set(pending.get("team_b") or [])
-
-    latin_pkey = _pkey_from_uid(LATIN_TEAM_DUELIST_PATCH_LATIN_UID)
-    harold_pkey = _pkey_from_uid(LATIN_TEAM_DUELIST_PATCH_HAROLD_UID)
-    fand_pkey = _pkey_from_uid(LATIN_TEAM_DUELIST_PATCH_FAND_UID)
-
-    latin_team = None
-    if latin_pkey in team_a:
-        latin_team = set(team_a)
-    elif latin_pkey in team_b:
-        latin_team = set(team_b)
-
-    if not latin_team:
-        return
-
-    tracked_on_latin_team = [p for p in (harold_pkey, fand_pkey) if p in latin_team]
-    if not tracked_on_latin_team:
-        return
-
-    changed_players = []
-
-    # Case 1: only one of the tracked players is on Latin's team
-    if len(tracked_on_latin_team) == 1:
-        p = tracked_on_latin_team[0]
-        if restricted_roles.get(p) == "Duelist":
-            if random.random() < float(LATIN_TEAM_DUELIST_PATCH_SINGLE_KEEP_OFF_DUELIST_CHANCE):
-                restricted_roles[p] = _latin_team_duelist_patch_pick_non_duelist(p, session)
-                changed_players.append(p)
-
-    # Case 2: both tracked players are on Latin's team
-    else:
-        duelists = [p for p in tracked_on_latin_team if restricted_roles.get(p) == "Duelist"]
-
-        # Only intervene if BOTH are currently Duelist-banned.
-        if len(duelists) >= 2:
-            p_change = random.choice(duelists)
-            restricted_roles[p_change] = _latin_team_duelist_patch_pick_non_duelist(p_change, session)
-            changed_players.append(p_change)
-
-    if not changed_players:
-        return
-
-    # Persist the adjusted hidden restrictions into the pending roll
-    pending["restricted_roles"] = dict(restricted_roles)
-    session.pending_roll_data = pending
-
-    try:
-        if isinstance(session.last_debug, dict):
-            session.last_debug["restricted_roles"] = dict(restricted_roles)
-    except Exception:
-        pass
-
-    try:
-        _save_session_state(key, session)
-    except Exception:
-        pass
-
-    # Quietly update the already-sent Discord message so the displayed emoji matches
-    message_id = getattr(session, "pending_roll_message_id", None)
-    if not message_id:
-        return
-
-    try:
-        msg = await channel.fetch_message(int(message_id))
-    except Exception:
-        return
-
-    old_content = msg.content or ""
-    new_content = old_content
-
-    for p in changed_players:
-        display_name = str((getattr(session, "display_name_map", {}) or {}).get(p, p) or p).strip()
-        new_role = restricted_roles.get(p)
-        new_content = _latin_team_duelist_patch_replace_player_restriction(
-            new_content,
-            display_name,
-            new_role,
-        )
-
-    if new_content != old_content:
-        try:
-            await msg.edit(content=new_content)
-        except Exception:
-            pass
-
-
-# Wrap the existing next-teams function so this season-only rule lives entirely here
-try:
-    _LATIN_TEAM_DUELIST_PATCH_ORIG_RUN_NEXT_TEAMS_ROLL = _run_next_teams_roll
-except Exception:
-    _LATIN_TEAM_DUELIST_PATCH_ORIG_RUN_NEXT_TEAMS_ROLL = None
-
-
-async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending: bool):
-    if _LATIN_TEAM_DUELIST_PATCH_ORIG_RUN_NEXT_TEAMS_ROLL is None:
-        return
-
-    await _LATIN_TEAM_DUELIST_PATCH_ORIG_RUN_NEXT_TEAMS_ROLL(
-        channel,
-        key,
-        commit_pending=commit_pending,
-    )
-
-    try:
-        await _latin_team_duelist_patch_apply(channel, key)
-    except Exception:
-        pass
 
 if __name__ == "__main__":
     # Replit-style keep-alive/web monitor is optional. On DigitalOcean, leave
