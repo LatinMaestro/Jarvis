@@ -1283,7 +1283,7 @@ def upsert_match_into_mr_tables(*, season_id: int, game_label: str, payload: dic
             (
                 season_id, str(match_uid), game_label,
                 uid_i, player_name, bot_flag,
-                p.get("player_icon"), p.get("camp"),
+                p.get("player_icon"), _normalise_camp_key(p.get("camp")),
                 p.get("cur_hero_id"), p.get("cur_hero_icon"), is_win_flag,
                 _safe_int(p.get("kills"), 0),
                 _safe_int(p.get("deaths"), 0),
@@ -2036,9 +2036,6 @@ async def backfill_hero_dht_cmd(ctx, season: int | None = None):
     One-off utility to populate mr_hero_segments.hero_damage/hero_heal/hero_damage_taken
     from stored mr_match_json_raw, if the API payload includes per-hero D/H/T.
     """
-    if not _is_admin(ctx):
-        await ctx.send("❌ You need **Manage Server** permission to run this.")
-        return
 
     ensure_mr_hero_segments_dht_cols()
 
@@ -2179,20 +2176,17 @@ AUTO_IMPORT_HISTORY_PAGE_SIZE = int(os.getenv("AUTO_IMPORT_HISTORY_PAGE_SIZE", "
 AUTO_IMPORT_MAX_HISTORY_PAGES = int(os.getenv("AUTO_IMPORT_MAX_HISTORY_PAGES", "2"))
 AUTO_IMPORT_HISTORY_REQUEST_DELAY = float(os.getenv("AUTO_IMPORT_HISTORY_REQUEST_DELAY", "0.35"))
 AUTO_IMPORT_DETAIL_REQUEST_DELAY = float(os.getenv("AUTO_IMPORT_DETAIL_REQUEST_DELAY", "0.25"))
-
-# Manual auto-import now refreshes roster/player API data by default before scanning.
-# You can still bypass it for a quick scan with: !auto_import_run no_refresh
-AUTO_IMPORT_REFRESH_ROSTER_DEFAULT = os.getenv(
-    "AUTO_IMPORT_REFRESH_ROSTER_DEFAULT", "true"
-).strip().lower() in ("1", "true", "yes", "on")
-
-# The API update endpoint queues the refresh; give it a short settle window before reading match history.
-AUTO_IMPORT_REFRESH_SETTLE_SECONDS = float(os.getenv("AUTO_IMPORT_REFRESH_SETTLE_SECONDS", "12"))
-
-# Cursor overlap: prevents late API-side matches being skipped when they appear after the cursor was advanced.
-# Increase to 24 if the API keeps backfilling older session games late.
-AUTO_IMPORT_CURSOR_GRACE_HOURS = float(os.getenv("AUTO_IMPORT_CURSOR_GRACE_HOURS", "12"))
-
+# Refresh roster/player API data before manual imports by default.
+# IMPORTANT: the API update endpoint is queue/lock based, so a local cooldown is
+# used below to avoid re-queueing the same player over and over.
+AUTO_IMPORT_REFRESH_ROSTER_DEFAULT = os.getenv("AUTO_IMPORT_REFRESH_ROSTER_DEFAULT", "true").strip().lower() in ("1", "true", "yes", "on")
+AUTO_IMPORT_PLAYER_UPDATE_COOLDOWN_MINUTES = int(os.getenv("AUTO_IMPORT_PLAYER_UPDATE_COOLDOWN_MINUTES", "31"))
+AUTO_IMPORT_POST_REFRESH_WAIT_SECONDS = float(os.getenv("AUTO_IMPORT_POST_REFRESH_WAIT_SECONDS", "20"))
+AUTO_IMPORT_UPDATE_CONCURRENCY = int(os.getenv("AUTO_IMPORT_UPDATE_CONCURRENCY", "1"))
+AUTO_IMPORT_UPDATE_REQUEST_DELAY = float(os.getenv("AUTO_IMPORT_UPDATE_REQUEST_DELAY", "0.75"))
+AUTO_IMPORT_USE_HISTORY_V2 = os.getenv("AUTO_IMPORT_USE_HISTORY_V2", "true").strip().lower() in ("1", "true", "yes", "on")
+AUTO_IMPORT_MATCH_DETAIL_RETRY_ATTEMPTS = int(os.getenv("AUTO_IMPORT_MATCH_DETAIL_RETRY_ATTEMPTS", "4"))
+AUTO_IMPORT_MATCH_DETAIL_RETRY_BASE_SECONDS = float(os.getenv("AUTO_IMPORT_MATCH_DETAIL_RETRY_BASE_SECONDS", "1.5"))
 AUTO_IMPORT_API_SEASONS_ENV = os.getenv("AUTO_IMPORT_API_SEASONS", "").strip()
 
 # Minimum humans per team (humans = roster players)
@@ -2355,6 +2349,99 @@ def _set_setting(key: str, value: str):
         ON CONFLICT(k) DO UPDATE SET v=excluded.v
     """, (key, str(value)))
     conn.commit()
+
+
+def _player_update_setting_key(uid: int | str) -> str:
+    return f"auto_import_player_update_last_utc:{str(uid).strip()}"
+
+
+def _get_player_update_last_utc(uid: int | str) -> datetime | None:
+    raw = _get_setting(_player_update_setting_key(uid), None)
+    return _parse_iso_utc(raw) if raw else None
+
+
+def _set_player_update_last_utc(uid: int | str):
+    _set_setting(_player_update_setting_key(uid), _now_iso_utc())
+
+
+def _player_update_due(uid: int | str, *, force: bool = False) -> tuple[bool, int]:
+    """
+    Returns (is_due, remaining_seconds).
+
+    The MarvelRivalsAPI player update endpoint is queue/lock based. Re-queueing
+    the same player too often can make the API-side data take longer to refresh,
+    so the bot keeps a local cooldown per UID.
+    """
+    if force:
+        return True, 0
+
+    last = _get_player_update_last_utc(uid)
+    if last is None:
+        return True, 0
+
+    cooldown_s = max(0, int(AUTO_IMPORT_PLAYER_UPDATE_COOLDOWN_MINUTES * 60))
+    elapsed_s = int((datetime.now(timezone.utc) - last).total_seconds())
+    remaining = max(0, cooldown_s - elapsed_s)
+    return remaining <= 0, remaining
+
+
+def _auto_import_refresh_summary_text(summary: dict | None) -> str:
+    if not summary:
+        return ""
+    total = int(summary.get("total") or 0)
+    queued = int(summary.get("queued") or 0)
+    skipped = int(summary.get("skipped_cooldown") or 0)
+    failed = int(summary.get("failed") or 0)
+    waited = int(float(summary.get("waited_seconds") or 0))
+    return (
+        f"player_updates_queued={queued}/{total} "
+        f"cooldown_skips={skipped} update_failed={failed} wait_s={waited}"
+    )
+
+
+def _normalise_camp_key(camp):
+    """
+    Normalise API camp/team values for comparisons and DB storage.
+
+    The API documentation examples use string camps such as 'A', while live
+    payloads may use 0/1 or 1/2. Internally, store the first team as 0 and the
+    second team as 1 where the value can be recognised.
+    """
+    if camp is None:
+        return None
+
+    try:
+        # bool is a subclass of int; treat it as numeric if it appears.
+        i = int(camp)
+        if i in (0, 1):
+            return i
+        if i == 2:
+            return 1
+        return i
+    except Exception:
+        pass
+
+    s = str(camp).strip().lower()
+    if not s:
+        return None
+
+    if s in ("a", "alpha", "blue", "home", "team0", "team_0", "team 0", "0"):
+        return 0
+    if s in ("b", "bravo", "red", "away", "team1", "team_1", "team 1", "1"):
+        return 1
+    if s in ("team2", "team_2", "team 2", "2"):
+        return 1
+
+    return s
+
+
+def _camp_display_value(camp) -> str:
+    k = _normalise_camp_key(camp)
+    if k == 0:
+        return "Team 0"
+    if k == 1:
+        return "Team 1"
+    return "Unknown"
 
 
 def _is_auto_import_enabled() -> bool:
@@ -2597,6 +2684,9 @@ async def _fetch_match_history_for_player(query: str,
                                           skip: int = 0,
                                           season: str = None,
                                           game_mode: int = None):
+    """
+    Legacy v1 history endpoint retained as a fallback.
+    """
     q = urllib.parse.quote(str(query))
     params = [f"skip={int(skip)}"]
     if season is not None and str(season).strip() != "":
@@ -2605,6 +2695,60 @@ async def _fetch_match_history_for_player(query: str,
         params.append(f"game_mode={int(game_mode)}")
     path = f"/api/v1/player/{q}/match-history?" + "&".join(params)
     return await _api_get_json(path, session)
+
+
+async def _fetch_match_history_for_player_v2(query: str,
+                                             session: "aiohttp.ClientSession",
+                                             skip: int = 0,
+                                             season: str = None,
+                                             game_mode: int = None):
+    """
+    Preferred history endpoint.
+
+    v2 supports explicit page + limit pagination. It has been more reliable for
+    recent-match discovery than the legacy skip-only request path.
+    """
+    q = urllib.parse.quote(str(query))
+    limit = max(1, int(AUTO_IMPORT_HISTORY_PAGE_SIZE or MATCH_HISTORY_PER_PLAYER_LIMIT or 20))
+    page = max(1, (int(skip) // limit) + 1)
+
+    params = [
+        f"page={page}",
+        f"limit={limit}",
+    ]
+    if season is not None and str(season).strip() != "":
+        params.append(f"season={urllib.parse.quote(str(season).strip())}")
+    if game_mode is not None:
+        params.append(f"game_mode={int(game_mode)}")
+
+    path = f"/api/v2/player/{q}/match-history?" + "&".join(params)
+    return await _api_get_json(path, session)
+
+
+async def _fetch_match_history_best(query: str,
+                                    session: "aiohttp.ClientSession",
+                                    skip: int = 0,
+                                    season: str = None,
+                                    game_mode: int = None):
+    """
+    Fetch player history using v2 first, with v1 fallback for compatibility.
+
+    429 is never swallowed here; the caller's backoff handler deals with it.
+    """
+    if AUTO_IMPORT_USE_HISTORY_V2:
+        try:
+            return await _fetch_match_history_for_player_v2(
+                query, session, skip=skip, season=season, game_mode=game_mode
+            )
+        except RuntimeError as e:
+            if "RATE_LIMIT_429" in str(e):
+                raise
+            # Fall through to legacy v1 if v2 has a non-rate-limit issue.
+            pass
+
+    return await _fetch_match_history_for_player(
+        query, session, skip=skip, season=season, game_mode=game_mode
+    )
 
 
 async def _fetch_match_details(match_uid: str,
@@ -2665,39 +2809,80 @@ async def _update_roster_players_trigger(
     *,
     roster_uids: list[int],
     ctx: "commands.Context" = None,
-    concurrency: int = 3,
-    per_call_delay_s: float = 0.25,
+    concurrency: int | None = None,
+    per_call_delay_s: float | None = None,
+    force: bool = False,
 ) -> dict:
     """
     Triggers player update for each roster uid.
-    - Concurrency capped to reduce 429s
-    - Retries with backoff on 429
-    Returns summary dict.
+
+    The API-side update endpoint is queue/lock based, so this function applies
+    a local per-player cooldown unless force=True. This prevents repeated
+    !auto_import_run attempts from pushing players to the back of the API queue.
     """
     if aiohttp is None:
         raise RuntimeError("aiohttp missing; cannot call API.")
 
-    # Safety: empty roster
-    if not roster_uids:
-        return {"total": 0, "queued": 0, "failed": 0, "failures": []}
+    unique_uids = []
+    seen = set()
+    for uid in roster_uids or []:
+        try:
+            i = int(uid)
+        except Exception:
+            continue
+        if i not in seen:
+            unique_uids.append(i)
+            seen.add(i)
+
+    if not unique_uids:
+        return {
+            "total": 0,
+            "queued": 0,
+            "failed": 0,
+            "skipped_cooldown": 0,
+            "failures": [],
+        }
+
+    due_uids = []
+    cooldown_skips = []
+    for uid in unique_uids:
+        due, remaining = _player_update_due(uid, force=force)
+        if due:
+            due_uids.append(uid)
+        else:
+            cooldown_skips.append({"uid": uid, "remaining_seconds": remaining})
+
+    results = {
+        "total": len(unique_uids),
+        "queued": 0,
+        "failed": 0,
+        "skipped_cooldown": len(cooldown_skips),
+        "cooldown_skips": cooldown_skips,
+        "failures": [],
+    }
+
+    if not due_uids:
+        if ctx is not None:
+            await ctx.send(
+                f"Roster refresh skipped by local cooldown: **{results['skipped_cooldown']}** / **{results['total']}**."
+            )
+        return results
 
     timeout = aiohttp.ClientTimeout(total=25)
-    sem = asyncio.Semaphore(max(1, int(concurrency)))
-
-    results = {"total": len(roster_uids), "queued": 0, "failed": 0, "failures": []}
+    sem = asyncio.Semaphore(max(1, int(concurrency or AUTO_IMPORT_UPDATE_CONCURRENCY)))
+    delay_s = float(per_call_delay_s if per_call_delay_s is not None else AUTO_IMPORT_UPDATE_REQUEST_DELAY)
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
 
         async def _one(uid: int):
             async with sem:
-                # Retry on 429 with exponential backoff
                 backoff = 1.2
                 for attempt in range(1, 5):  # 4 attempts max
                     try:
                         await _trigger_player_update(str(uid), session)
+                        _set_player_update_last_utc(uid)
                         results["queued"] += 1
-                        # small pacing delay to be gentle to the API
-                        await asyncio.sleep(per_call_delay_s)
+                        await asyncio.sleep(delay_s)
                         return
                     except Exception as e:
                         msg = str(e)
@@ -2709,18 +2894,15 @@ async def _update_roster_players_trigger(
                         results["failures"].append({"uid": uid, "error": msg[:200]})
                         return
 
-        # Fire tasks
-        tasks_ = [asyncio.create_task(_one(uid)) for uid in roster_uids]
+        tasks_ = [asyncio.create_task(_one(uid)) for uid in due_uids]
         await asyncio.gather(*tasks_)
 
-    # Optional: short feedback to Discord
     if ctx is not None:
         await ctx.send(
             f"Roster refresh queued: **{results['queued']}** / **{results['total']}** "
-            f"(failed **{results['failed']}**)."
+            f"(cooldown skipped **{results['skipped_cooldown']}**, failed **{results['failed']}**)."
         )
         if results["failed"] > 0:
-            # Show up to 8 failures
             sample = results["failures"][:8]
             lines = [f"- {x['uid']}: {x['error']}" for x in sample]
             await ctx.send("Some refresh failures:\n" + "\n".join(lines))
@@ -2793,113 +2975,6 @@ def _parse_is_win_flag(raw) -> int | None:
             return 2
 
     return None
-
-def _int_or_none(value):
-    """Safely convert a value to int, returning None if it cannot be converted."""
-    try:
-        if value is None:
-            return None
-        if isinstance(value, bool):
-            return int(value)
-        if isinstance(value, (int, float)):
-            return int(value)
-        if isinstance(value, str):
-            value = value.strip()
-            if value == "":
-                return None
-            return int(float(value))
-    except Exception:
-        return None
-    return None
-
-
-def _extract_team_camp_from_player(p: dict) -> int | None:
-    """
-    Returns a usable team/camp value for a match player.
-
-    Primary source:
-      - API camp/team fields
-
-    Fallback:
-      - If camp is missing, infer side from is_win:
-          winners = camp 1
-          losers  = camp 0
-
-    This fixes cases where match details have valid win/loss data but do not
-    expose a reliable camp value for the auto-import roster/team gate.
-    """
-    if not isinstance(p, dict):
-        return None
-
-    # Direct API keys seen/likely across payload variants.
-    direct_keys = (
-        "camp",
-        "camp_id",
-        "team",
-        "team_id",
-        "side",
-        "side_id",
-        "battle_side",
-        "player_side",
-    )
-
-    for key in direct_keys:
-        camp = _int_or_none(p.get(key))
-        if camp is not None:
-            return camp
-
-    # Some APIs place extra fields under dynamic_fields.
-    dyn = p.get("dynamic_fields") or {}
-    if isinstance(dyn, dict):
-        for key in direct_keys:
-            camp = _int_or_none(dyn.get(key))
-            if camp is not None:
-                return camp
-
-    # Some payloads may use nested team/camp dictionaries.
-    for parent_key in ("team", "camp", "side"):
-        parent = p.get(parent_key)
-        if isinstance(parent, dict):
-            for child_key in ("id", "team_id", "camp", "camp_id", "side", "side_id"):
-                camp = _int_or_none(parent.get(child_key))
-                if camp is not None:
-                    return camp
-
-    # Final fallback: infer side from result.
-    # This is acceptable for non-draw matches because all winners are on one side
-    # and all losers are on the other side.
-    result = _parse_is_win_flag(p.get("is_win"))
-    if result == 1:
-        return 1
-    if result == 0:
-        return 0
-
-    return None
-
-
-def _normalise_match_payload_team_fields(payload: dict) -> dict:
-    """
-    Ensures each match player has a usable p['camp'] where possible.
-
-    This mutates and returns the same payload object. It is intentionally called
-    before the min-human gate and before import so downstream stats commands also
-    get a usable camp value.
-    """
-    md = (payload or {}).get("match_details") or {}
-    players = md.get("match_players") or []
-
-    if not isinstance(players, list):
-        return payload
-
-    for p in players:
-        if not isinstance(p, dict):
-            continue
-
-        camp = _extract_team_camp_from_player(p)
-        if camp is not None:
-            p["camp"] = camp
-
-    return payload
 
 
 def _is_draw_match(payload: dict) -> bool:
@@ -3012,19 +3087,15 @@ def _passes_min_humans_each_team(payload: dict) -> bool:
         * at least MIN_ROSTER_HUMANS_TOTAL rostered players overall
         * at least MIN_ROSTER_HUMANS_PER_TEAM rostered players on each of the 2 teams
 
-    Update:
-    - Normalises missing/unreliable camp values before checking.
-    - Falls back to win/loss side where camp is missing.
+    Camp values are normalised because the API may return camps as 0/1, 1/2,
+    or strings such as A/B.
     """
-    payload = _normalise_match_payload_team_fields(payload)
-
     roster_uids, roster_names_norm = _roster_uids_and_names()
     if not roster_uids and not roster_names_norm:
         return False
 
     md = (payload or {}).get("match_details") or {}
     players = md.get("match_players") or []
-
     if not isinstance(players, list):
         players = []
 
@@ -3034,43 +3105,76 @@ def _passes_min_humans_each_team(payload: dict) -> bool:
     for p in players:
         if not isinstance(p, dict):
             continue
-
         if _is_bot_player(p):
             continue
 
         uid = p.get("player_uid")
-        name = (
-            p.get("nick_name")
-            or p.get("nickname")
-            or p.get("player_name")
-            or p.get("player")
-            or ""
-        )
+        name = (p.get("nick_name") or p.get("nickname") or p.get("player_name")
+                or p.get("player") or "")
         name = str(name).strip() if name else None
 
         if not _is_roster_human(uid, name, roster_uids, roster_names_norm):
             continue
 
-        camp = _extract_team_camp_from_player(p)
-        if camp is None:
+        camp_key = _normalise_camp_key(p.get("camp"))
+        if camp_key is None:
             continue
 
-        roster_humans_by_team[int(camp)] += 1
+        roster_humans_by_team[camp_key] += 1
         roster_humans_total += 1
 
     teams = [t for t, ct in roster_humans_by_team.items() if ct > 0]
-
-    # Need rostered humans represented on exactly two sides.
     if len(teams) != 2:
         return False
 
     if roster_humans_total < int(MIN_ROSTER_HUMANS_TOTAL):
         return False
 
-    return all(
-        roster_humans_by_team[t] >= int(MIN_ROSTER_HUMANS_PER_TEAM)
-        for t in teams
-    )
+    return all(roster_humans_by_team[t] >= int(MIN_ROSTER_HUMANS_PER_TEAM)
+               for t in teams)
+
+
+def _min_humans_breakdown(payload: dict) -> str:
+    """
+    Short diagnostic used by auto_import_debug when a match is rejected by the
+    roster-human/team filter.
+    """
+    roster_uids, roster_names_norm = _roster_uids_and_names()
+    md = (payload or {}).get("match_details") or {}
+    players = md.get("match_players") or []
+    by_team = defaultdict(list)
+    roster_total = 0
+    unknown_camp = 0
+
+    if not isinstance(players, list):
+        players = []
+
+    for p in players:
+        if not isinstance(p, dict) or _is_bot_player(p):
+            continue
+
+        uid = p.get("player_uid")
+        name = str(
+            p.get("nick_name") or p.get("nickname") or p.get("player_name")
+            or p.get("player") or uid or "unknown"
+        ).strip()
+
+        if not _is_roster_human(uid, name, roster_uids, roster_names_norm):
+            continue
+
+        roster_total += 1
+        camp_key = _normalise_camp_key(p.get("camp"))
+        if camp_key is None:
+            unknown_camp += 1
+            continue
+        by_team[camp_key].append(name)
+
+    parts = [f"roster_total={roster_total}"]
+    for team_key in sorted(by_team.keys(), key=lambda x: str(x)):
+        parts.append(f"{_camp_display_value(team_key)}={len(by_team[team_key])}")
+    if unknown_camp:
+        parts.append(f"unknown_camp={unknown_camp}")
+    return " ".join(parts)
 
 
 # -------------------------
@@ -3153,10 +3257,6 @@ async def _import_match_into_season(
     """
     ensure_mr_api_tables()
     ensure_auto_import_tables()
-
-    # Ensure team/camp values are usable before writing mr_player_match,
-    # game_stats, teammate matrices, low-team stats, etc.
-    payload = _normalise_match_payload_team_fields(payload)
 
     season_id = int(season_id)
     game_label = _next_game_label_for_season(season_id)
@@ -3295,21 +3395,19 @@ def _parse_auto_import_run_args(args) -> dict:
     """Parse optional !auto_import_run arguments without breaking the existing command."""
     opts = {
         "lookback_days": int(AUTO_IMPORT_MAX_LOOKBACK_DAYS),
-
-        # Default is now ON because the API can otherwise return stale player history.
-        # Use !auto_import_run no_refresh only when deliberately skipping API-side refresh.
         "refresh_roster": bool(AUTO_IMPORT_REFRESH_ROSTER_DEFAULT),
-
+        "force_refresh": False,
         "reset_cursor": False,
     }
-
     for raw in args or []:
         a = str(raw).strip().lower()
         if not a:
             continue
-
         if a in ("refresh", "--refresh", "update", "--update"):
             opts["refresh_roster"] = True
+        elif a in ("force_refresh", "force-refresh", "--force-refresh", "refresh_force", "refresh-force", "--refresh-force"):
+            opts["refresh_roster"] = True
+            opts["force_refresh"] = True
         elif a in ("no_refresh", "no-refresh", "--no-refresh", "norefresh"):
             opts["refresh_roster"] = False
         elif a in ("reset_cursor", "reset-cursor", "--reset-cursor", "reset"):
@@ -3342,6 +3440,8 @@ async def _auto_import_tick(
     force: bool = False,
     status_cb=None,
     lookback_days: int | None = None,
+    refresh_roster: bool = False,
+    force_refresh: bool = False,
 ):
     """
     Manual importer, optimised for low API usage.
@@ -3391,6 +3491,36 @@ async def _auto_import_tick(
         api_seasons = _get_auto_import_api_seasons()
         imported_count = 0
         seen_match_uids: set[str] = set()
+        refresh_summary = None
+
+        if refresh_roster and roster_uids:
+            _status(
+                "Refreshing player update queue…",
+                f"checking {len(roster_uids)} roster player(s) before match-history scan",
+            )
+            try:
+                refresh_summary = await _update_roster_players_trigger(
+                    roster_uids=list(sorted(roster_uids)),
+                    ctx=None,
+                    concurrency=AUTO_IMPORT_UPDATE_CONCURRENCY,
+                    per_call_delay_s=AUTO_IMPORT_UPDATE_REQUEST_DELAY,
+                    force=force_refresh,
+                )
+
+                queued_updates = int((refresh_summary or {}).get("queued") or 0)
+                if queued_updates > 0 and AUTO_IMPORT_POST_REFRESH_WAIT_SECONDS > 0:
+                    wait_s = float(AUTO_IMPORT_POST_REFRESH_WAIT_SECONDS)
+                    refresh_summary["waited_seconds"] = wait_s
+                    _status(
+                        "Waiting for API refresh…",
+                        f"queued={queued_updates}; waiting {int(wait_s)}s before scanning history",
+                    )
+                    await asyncio.sleep(wait_s)
+
+                _set_setting("auto_import_last_refresh_summary", _auto_import_refresh_summary_text(refresh_summary))
+            except Exception as e:
+                refresh_summary = {"total": len(roster_uids), "queued": 0, "failed": len(roster_uids), "skipped_cooldown": 0, "waited_seconds": 0}
+                _set_setting("auto_import_last_refresh_summary", f"refresh_failed={type(e).__name__}: {str(e)[:180]}")
 
         counters = {
             "players_done": 0,
@@ -3430,18 +3560,6 @@ async def _auto_import_tick(
 
                     state = _get_auto_import_scan_state(q, api_season)
                     cursor_dt = _parse_iso_utc(state.get("newest_match_time_utc")) if state else None
-
-                    # Do not hard-stop exactly at the last cursor.
-                    # The API can expose matches late after a player refresh, and those late matches may have
-                    # timestamps before the previous newest history item. Scan a small overlap window to catch them.
-                    try:
-                        cursor_floor_dt = (
-                            cursor_dt - timedelta(hours=max(0.0, float(AUTO_IMPORT_CURSOR_GRACE_HOURS)))
-                            if cursor_dt else None
-                        )
-                    except Exception:
-                        cursor_floor_dt = cursor_dt
-
                     newest_dt_seen: datetime | None = None
                     newest_uid_seen: str | None = None
                     fetched_any_page = False
@@ -3551,22 +3669,36 @@ async def _auto_import_tick(
                             )
 
                             try:
-                                payload = await _fetch_match_details(match_uid, session)
+                                payload = await _fetch_match_details_with_backoff(match_uid, session)
                                 await asyncio.sleep(float(AUTO_IMPORT_DETAIL_REQUEST_DELAY))
                             except RuntimeError as e:
+                                msg = str(e)
                                 had_error = True
-                                if "RATE_LIMIT_429" in str(e):
+                                if "RATE_LIMIT_429" in msg:
                                     counters["details_429"] += 1
                                     _status("Rate limited (details)", f"429 on match-details; stopping this player/season | match_uid={match_uid}")
                                     reached_old_history = True
-                                else:
-                                    counters["details_err"] += 1
-                                break
+                                    break
+
+                                # Transient match detail failure, including API 500.
+                                # Do not let one bad match block the other games from the same session.
+                                counters["details_err"] += 1
+                                _set_setting("auto_import_last_error", f"{match_uid}: details {msg[:220]}")
+                                _record_skipped_match(
+                                    match_uid,
+                                    match_dt_utc=match_dt_hist,
+                                    season_id=None,
+                                    reason="DETAILS_TEMP_ERROR",
+                                    source="auto_import_run",
+                                    details={"error": msg[:500]},
+                                )
+                                _status("Match details unavailable", f"skipping for now | match_uid={match_uid} | {msg[:120]}")
+                                continue
                             except Exception as e:
                                 had_error = True
                                 counters["details_err"] += 1
                                 _set_setting("auto_import_last_error", f"{match_uid}: details {type(e).__name__}: {e}")
-                                break
+                                continue
 
                             match_dt = _extract_match_datetime_utc(payload) or match_dt_hist
                             if match_dt is None:
@@ -3648,12 +3780,14 @@ async def _auto_import_tick(
 
                 counters["players_done"] += 1
 
+        refresh_txt = _auto_import_refresh_summary_text(refresh_summary)
         summary = (
             f"imported={counters['imported']} seen_candidates={counters['seen']} history_pages={counters['pages_done']} "
             f"cursor_skips={counters['skip_cursor']} cutoff_skips={counters['skip_cutoff']} already={counters['skip_already_imported']} "
             f"deleted={counters['skip_deleted']} draws={counters['skip_draw_pre'] + counters['skip_draw_post']} min_humans={counters['skip_min_humans']} "
             f"429(history)={counters['api_429']} 429(details)={counters['details_429']} "
             f"errors(history)={counters['api_err']} errors(details)={counters['details_err']} cursor_updates={counters['cursor_updates']}"
+            + (f" {refresh_txt}" if refresh_txt else "")
         )
 
         _set_setting("auto_import_last_run", _now_iso_utc())
@@ -3675,11 +3809,11 @@ async def _fetch_history_with_backoff(query: str,
 
     for attempt in range(attempts):
         try:
-            return await _fetch_match_history_for_player(query,
-                                                         session,
-                                                         skip=skip,
-                                                         season=season,
-                                                         game_mode=game_mode)
+            return await _fetch_match_history_best(query,
+                                                   session,
+                                                   skip=skip,
+                                                   season=season,
+                                                   game_mode=game_mode)
         except RuntimeError as e:
             if "RATE_LIMIT_429" in str(e):
                 await asyncio.sleep(backoff)
@@ -3687,6 +3821,53 @@ async def _fetch_history_with_backoff(query: str,
                 continue
             raise  # other RuntimeErrors should bubble up
     raise RuntimeError("RATE_LIMIT_429 (exceeded retry attempts)")
+
+
+async def _fetch_match_details_with_backoff(match_uid: str, session):
+    """
+    Fetch match details with retries for 429 and transient 5xx failures.
+
+    A single bad match details response should not stop the rest of the nightly
+    auto-import run. The caller decides whether a final failure should block
+    cursor advancement.
+    """
+    attempts = max(1, int(AUTO_IMPORT_MATCH_DETAIL_RETRY_ATTEMPTS))
+    base = max(0.1, float(AUTO_IMPORT_MATCH_DETAIL_RETRY_BASE_SECONDS))
+    backoff = base
+    last_error = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return await _fetch_match_details(match_uid, session)
+        except RuntimeError as e:
+            msg = str(e)
+            last_error = msg
+
+            transient = (
+                "RATE_LIMIT_429" in msg
+                or "API_ERROR_500" in msg
+                or "API_ERROR_502" in msg
+                or "API_ERROR_503" in msg
+                or "API_ERROR_504" in msg
+                or "HTTP 500" in msg
+                or "HTTP 502" in msg
+                or "HTTP 503" in msg
+                or "HTTP 504" in msg
+            )
+
+            if transient and attempt < attempts:
+                await asyncio.sleep(backoff)
+                backoff = min(20.0, backoff * 1.8)
+                continue
+
+            raise RuntimeError(
+                f"MATCH_DETAILS_UNAVAILABLE after {attempt} attempt(s): {msg[:260]}"
+            )
+
+    raise RuntimeError(
+        f"MATCH_DETAILS_UNAVAILABLE: {str(last_error or 'unknown error')[:260]}"
+    )
+
 
 async def _start_status_ticker(
     ctx,
@@ -4046,7 +4227,6 @@ except Exception:
     pass
 
 @bot.command(name='set_season')
-@commands.has_permissions(administrator=True)
 async def set_season(ctx, season_id: int):
     ensure_mr_api_tables()
     ensure_seasons_table()
@@ -4112,7 +4292,6 @@ async def list_seasons(ctx):
 # Does NOT delete old data.
 # ---------------------------
 @bot.command(name='reset_season')
-@commands.has_permissions(administrator=True)
 async def reset_season(ctx, season_id: int = None):
     ensure_mr_api_tables()
     ensure_seasons_table()
@@ -4266,7 +4445,6 @@ async def browse_games(ctx, limit: int = 40):
 # Usage:
 #   !refresh_heroes
 #   !refresh_heros     (alias)
-# Admin only (Manage Server permission, consistent with your other admin commands)
 # ============================================================================================================
 
 try:
@@ -4277,9 +4455,6 @@ except Exception:
 @bot.command(name="refresh_heroes", aliases=["refresh_heros", "refresh_hero_cache", "refreshheroes"])
 async def refresh_heroes_cmd(ctx):
     # Admin guard (matches your existing pattern)
-    if not _is_admin(ctx):
-        await ctx.send("Admin only.")
-        return
 
     # Ensure tables exist
     try:
@@ -4501,10 +4676,7 @@ from datetime import datetime, timezone
 _ALLOWED_ROLES = {"vanguard": "Vanguard", "duelist": "Duelist", "strategist": "Strategist"}
 
 def _ss_is_admin(ctx) -> bool:
-    try:
-        return bool(ctx.author.guild_permissions.administrator)
-    except Exception:
-        return False
+    return True
 
 def _ensure_hero_cache_schema_strict():
     """
@@ -4553,9 +4725,6 @@ async def hero_role_set(ctx, hero_id: str = None, role: str = None, *, hero_name
     """
     global c, conn
 
-    if not _ss_is_admin(ctx):
-        await ctx.send("You do not have permission to use this command.")
-        return
 
     if not hero_id or not role:
         await ctx.send("Usage: `!hero_role_set <hero_id> <Vanguard|Duelist|Strategist> [optional hero name]`")
@@ -4636,10 +4805,7 @@ async def hero_role_set(ctx, hero_id: str = None, role: str = None, *, hero_name
 # ============================================================================================================
 # ============================================================================================================
 def _is_admin(ctx) -> bool:
-    try:
-        return ctx.author.guild_permissions.manage_guild
-    except Exception:
-        return False
+    return True
 
 
 @bot.command(name="auto_import_status")
@@ -4708,18 +4874,12 @@ async def skipped_draws_cmd(ctx, limit: int = 20):
 
 @bot.command(name="auto_import_on")
 async def auto_import_on(ctx):
-    if not _is_admin(ctx):
-        await ctx.send("Admin only.")
-        return
     _set_setting("auto_import_enabled", "true")
     await ctx.send("Legacy auto-import enabled flag is now **ON**. Background polling is still disabled; use `!auto_import_run` manually after sessions.")
 
 
 @bot.command(name="auto_import_off")
 async def auto_import_off(ctx):
-    if not _is_admin(ctx):
-        await ctx.send("Admin only.")
-        return
     _set_setting("auto_import_enabled", "false")
     await ctx.send("Legacy auto-import enabled flag is now **OFF**. Background polling is disabled; manual `!auto_import_run` still works.")
 
@@ -4733,9 +4893,6 @@ async def auto_import_cutoff_cmd(ctx, date_bris: str = None):
       !auto_import_cutoff 2026-01-05  (sets to 00:00 that day Brisbane)
     """
     if date_bris:
-        if not _is_admin(ctx):
-            await ctx.send("Admin only.")
-            return
         try:
             set_auto_import_cutoff_bris(date_bris)
             await ctx.send(
@@ -4762,9 +4919,6 @@ async def season_window_set_cmd(ctx,
       !season_window_set 1 2025-12-01 2025-12-31
       !season_window_set 2 2026-01-01 OPEN
     """
-    if not _is_admin(ctx):
-        await ctx.send("Admin only.")
-        return
     if end_bris and str(end_bris).strip().upper() == "OPEN":
         end_bris = None
     try:
@@ -4795,9 +4949,6 @@ async def season_windows_cmd(ctx):
 
 @bot.command(name="roster_add")
 async def roster_add(ctx, player_uid: int, *, player_name: str = ""):
-    if not _is_admin(ctx):
-        await ctx.send("Admin only.")
-        return
     ensure_auto_import_tables()
     c.execute(
         """
@@ -4811,9 +4962,6 @@ async def roster_add(ctx, player_uid: int, *, player_name: str = ""):
 
 @bot.command(name="roster_remove")
 async def roster_remove(ctx, player_uid: int):
-    if not _is_admin(ctx):
-        await ctx.send("Admin only.")
-        return
     ensure_auto_import_tables()
     c.execute("UPDATE mr_roster SET enabled=0 WHERE player_uid=?",
               (int(player_uid), ))
@@ -4845,9 +4993,6 @@ async def roster_update_all(ctx):
     Usage:
       !roster_update_all
     """
-    if not _is_admin(ctx):
-        await ctx.send("Admin only.")
-        return
     ensure_auto_import_tables()
     c.execute("SELECT player_uid FROM mr_roster WHERE enabled=1 ORDER BY player_uid ASC")
     roster_uids = [int(r[0]) for r in c.fetchall() if r and r[0] is not None]
@@ -4866,9 +5011,6 @@ async def roster_update_all(ctx):
 
 @bot.command(name="auto_import_run")
 async def auto_import_run(ctx, *args):
-    if not _is_admin(ctx):
-        await ctx.send("Admin only.")
-        return
 
     opts = _parse_auto_import_run_args(args)
     if opts.get("reset_cursor"):
@@ -4898,41 +5040,20 @@ async def auto_import_run(ctx, *args):
         _status_update(
             detail=(
                 f"manual_only=True, legacy_enabled={enabled}, roster_uids={len(roster_uids)}, roster_names={len(roster_names_norm)}, "
-                f"lookback_days={opts['lookback_days']}, api_seasons={','.join(api_seasons)}, reset_cursor={opts['reset_cursor']}"
+                f"lookback_days={opts['lookback_days']}, api_seasons={','.join(api_seasons)}, reset_cursor={opts['reset_cursor']}, "
+                f"refresh_roster={opts['refresh_roster']}, force_refresh={opts['force_refresh']}"
             )
         )
 
-        # Always refresh roster/player API data before importing unless explicitly bypassed with:
-        # !auto_import_run no_refresh
-        if opts.get("refresh_roster") and roster_uids:
-            roster_uid_list = sorted(list(roster_uids))
-            _status_update(
-                phase="Queuing roster/player refresh…",
-                detail=f"queuing {len(roster_uid_list)} player(s) before import"
-            )
-
-            try:
-                refresh_result = await _update_roster_players_trigger(roster_uids=roster_uid_list, ctx=None)
-                queued = int((refresh_result or {}).get("queued", 0))
-                failed = int((refresh_result or {}).get("failed", 0))
-
-                if queued > 0 and float(AUTO_IMPORT_REFRESH_SETTLE_SECONDS) > 0:
-                    _status_update(
-                        phase="Waiting for API refresh to settle…",
-                        detail=f"queued={queued}, failed={failed}; waiting {AUTO_IMPORT_REFRESH_SETTLE_SECONDS:g}s before scanning history"
-                    )
-                    await asyncio.sleep(float(AUTO_IMPORT_REFRESH_SETTLE_SECONDS))
-
-                _status_update(detail=f"refresh queued={queued}, failed={failed}; starting import…")
-
-            except Exception as e:
-                _status_update(detail=f"refresh queue failed: {str(e)[:160]} (continuing without refresh)")
-
-        _status_update(
-            phase="Importing recent matches…",
-            detail="Fetching recent pages with cursor overlap / writing new matches"
+        _status_update(phase="Importing recent matches…", detail="Refreshing player data if due, then fetching recent pages / applying cursor / writing new matches")
+        await _auto_import_tick(
+            bot,
+            force=True,
+            status_cb=_status_update,
+            lookback_days=opts["lookback_days"],
+            refresh_roster=opts.get("refresh_roster", False),
+            force_refresh=opts.get("force_refresh", False),
         )
-        await _auto_import_tick(bot, force=True, status_cb=_status_update, lookback_days=opts["lookback_days"])
 
         final = (
             "**Auto-import status**\n"
@@ -4940,9 +5061,26 @@ async def auto_import_run(ctx, *args):
             f"Last run: `{_get_setting('auto_import_last_run')}`\n"
             f"Imported this run: `{_get_setting('auto_import_last_imported_count')}`\n"
             f"Summary: `{_get_setting('auto_import_last_summary', '—')}`\n"
-            "Note: background auto-import is disabled. `!auto_import_run` now refreshes roster/player API data before scanning. Use `!auto_import_run no_refresh` only when you want to skip that refresh."
+            "Note: background auto-import is disabled. `!auto_import_run` now checks the player update queue by default, using a local cooldown so repeated runs do not keep re-queueing the same players. Use `no_refresh` to skip that check or `force_refresh` only when you intentionally want to override the local cooldown."
         )
         await _stop_status_ticker(stop_event, ticker_task, status_msg, final_text=final)
+
+        # Automatically refresh all stats channels after a successful manual import.
+        # This is intentionally run only after the import completes successfully, so a failed
+        # import does not trigger a stats refresh against partially updated data.
+        try:
+            await ctx.send("📊 Auto-import complete. Running `!run_all_stats` now…")
+            cmd = bot.get_command("run_all_stats")
+            if cmd and getattr(cmd, "callback", None):
+                await cmd.callback(ctx)
+            else:
+                await ctx.send("⚠️ `run_all_stats` command was not found, so the stats refresh was skipped.")
+        except Exception as e:
+            await ctx.send(f"⚠️ Auto-import completed, but `!run_all_stats` failed: `{type(e).__name__}: {e}`")
+            try:
+                traceback.print_exc()
+            except Exception:
+                pass
 
     except Exception as e:
         err_text = f"**Auto-import status**\n❌ Failed: `{str(e)[:180]}`"
@@ -4962,9 +5100,6 @@ async def auto_import_run(ctx, *args):
 
 @bot.command(name="auto_import_debug")
 async def auto_import_debug(ctx, player_uid: str = None):
-    if not _is_admin(ctx):
-        await ctx.send("Admin only.")
-        return
     if aiohttp is None:
         await ctx.send("aiohttp missing; cannot call API.")
         return
@@ -5000,9 +5135,11 @@ async def auto_import_debug(ctx, player_uid: str = None):
     timeout = aiohttp.ClientTimeout(total=25)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         try:
-            hist = await _fetch_match_history_for_player(str(player_uid),
-                                                         session,
-                                                         skip=0)
+            hist = await _fetch_history_with_backoff(str(player_uid),
+                                                     session,
+                                                     skip=0,
+                                                     season=None,
+                                                     game_mode=None)
         except Exception as e:
             await send_chunks(
                 f"FAILED to fetch match-history: {type(e).__name__}: {e}")
@@ -5062,7 +5199,7 @@ async def auto_import_debug(ctx, player_uid: str = None):
 
             # Fetch match details
             try:
-                payload = await _fetch_match_details(match_uid, session)
+                payload = await _fetch_match_details_with_backoff(match_uid, session)
             except Exception as e:
                 results.append(
                     f"[{idx}] {match_uid} ERROR: fetch match-details failed {type(e).__name__}: {e}"
@@ -5110,7 +5247,7 @@ async def auto_import_debug(ctx, player_uid: str = None):
             try:
                 if not _passes_min_humans_each_team(payload):
                     results.append(
-                        f"[{idx}] {match_uid} REJECT: roster rule not met (>=2 roster per team, >=4 total)"
+                        f"[{idx}] {match_uid} REJECT: roster rule not met (>=2 roster per team, >=4 total) | {_min_humans_breakdown(payload)}"
                     )
                     continue
             except Exception as e:
@@ -5150,9 +5287,6 @@ async def match_history_probe(ctx,
       - Adds small pacing delay between successful page fetches to reduce 429s.
       - Supports optional season and game_mode query params (v1 endpoint).
     """
-    if not _is_admin(ctx):
-        await ctx.send("Admin only.")
-        return
     if aiohttp is None:
         await ctx.send("aiohttp missing; cannot call API.")
         return
@@ -5206,11 +5340,11 @@ async def match_history_probe(ctx,
                 # Prefer your existing function signature; extend it if you already did.
                 # If your _fetch_match_history_for_player does NOT accept season/game_mode yet,
                 # update it per the note below.
-                return await _fetch_match_history_for_player(q,
-                                                             session,
-                                                             skip=skip,
-                                                             season=season_val,
-                                                             game_mode=gm_val)
+                return await _fetch_match_history_best(q,
+                                                        session,
+                                                        skip=skip,
+                                                        season=season_val,
+                                                        game_mode=gm_val)
             except RuntimeError as e:
                 if "RATE_LIMIT_429" in str(e):
                     await asyncio.sleep(backoff)
@@ -5428,9 +5562,18 @@ async def submit_match(ctx, match_or_url: str = None, game_label: str = None):
 
     # ---------- fetch payload ----------
     try:
-        payload = await mr_api_get_json(f"/api/v1/match/{match_uid}")
+        if aiohttp is None:
+            payload = await mr_api_get_json(f"/api/v1/match/{match_uid}")
+        else:
+            timeout = aiohttp.ClientTimeout(total=45)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                payload = await _fetch_match_details_with_backoff(match_uid, session)
     except Exception as e:
-        await ctx.send(f"Failed to fetch match: {e}")
+        await ctx.send(
+            "Failed to fetch match details after retrying. "
+            "This is usually an API-side match-details failure for that match, not a bot parsing issue. "
+            f"Error: `{type(e).__name__}: {str(e)[:260]}`"
+        )
         return
 
     # Skip draw matches (API typically encodes draws as is_win=2)
@@ -5562,7 +5705,7 @@ async def submit_match(ctx, match_or_url: str = None, game_label: str = None):
 
     team0, team1, unknown = [], [], []
     for (r, raw) in human_rows:
-        camp = raw.get("camp")
+        camp = _normalise_camp_key(raw.get("camp"))
         if camp == 0:
             team0.append((r, raw))
         elif camp == 1:
@@ -7976,7 +8119,6 @@ async def hero_synergy(ctx, mode: str = "humans",
 
 
 @bot.command(name="edit_game")
-@commands.has_permissions(administrator=True)
 async def edit_game(ctx, game_label: str, new_match_or_url: str = None):
     """
     API-only edit:
@@ -8155,7 +8297,6 @@ async def edit_game(ctx, game_label: str, new_match_or_url: str = None):
 # ============================================================
 
 @bot.command(name="undo_last_game")
-@commands.has_permissions(administrator=True)
 async def undo_last_game(ctx):
     """
     Deletes the most recently IMPORTED game in the CURRENT season across ALL tables.
@@ -8255,7 +8396,6 @@ async def undo_last_game(ctx):
 # COMMAND: delete_game (API-first)
 # ============================================================
 @bot.command(name="delete_game")
-@commands.has_permissions(administrator=True)
 async def delete_game(ctx, game_label: str):
     """
     Permanently delete a game label in the CURRENT season, including MR API side tables.
@@ -8321,7 +8461,7 @@ async def delete_game(ctx, game_label: str):
         f"🗑️ Game `{game_label}` has been permanently deleted (Season {season_id})."
     )
 
-    
+
 
 
 # ============================================================
@@ -8329,7 +8469,6 @@ async def delete_game(ctx, game_label: str):
 # ============================================================
 
 @bot.command(name="undelete_match")
-@commands.has_permissions(administrator=True)
 async def undelete_match(ctx, match_uid: str = None):
     """
     Removes a DELETED tombstone for a match_uid so auto-import can import it again
@@ -8371,7 +8510,6 @@ async def undelete_match(ctx, match_uid: str = None):
 
 
 @bot.command(name="mr_cleanup_orphans")
-@commands.has_permissions(administrator=True)
 async def mr_cleanup_orphans(ctx):
     """
     Cleans rows from convenience tables where the game_label no longer exists in mr_match_meta.
@@ -11970,7 +12108,7 @@ async def two_v_two_records(ctx):
     title = f"2v2 (Humans) Records — Season {season_id}  •  Matches: {len(labels)}"
     buf = create_2v2_records_image(results, title=title)
     await ctx.send(file=discord.File(fp=buf, filename="2v2_records.png"))
-    
+
 # ============================================================================================================
 # !profile — Single-image Scouting Report (API-native, 1 image, NO TOGGLE)
 #
@@ -19434,7 +19572,7 @@ def _nt_fix_team_monobans(team: set[str],
 
     restricted_roles[p_change] = new_ban
 
-    
+
 # ------------------------------------------------------------------------------------------------------------
 # LEADERBOARD IMAGE (filtered)
 # ------------------------------------------------------------------------------------------------------------
@@ -21428,7 +21566,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
             effective_ratios[p] = 0.0
 
     eligible_low = [p for p in active if p not in protected_low]
-    
+
     # =====================================================================================
     # NEW: low-team priority ranking
     # The most under-target players should be pulled back toward target quickly.
@@ -22104,7 +22242,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
 
     def disp(pkey: str) -> str:
         return session.display_name_map.get(pkey, pkey)
-        
+
     predicted_line = None
     try:
         predicted_line = _format_predicted_win_line(team_a, team_b)
@@ -23550,7 +23688,7 @@ async def fairness_debug(ctx):
 
 @bot.command(name="helpme", aliases=["helper", "commands", "help_cmds"])
 async def helpme(ctx):
-    admin_only = "🛡️ Admin only"
+    admin_only = ""
 
     sections = [
         (
@@ -23561,32 +23699,32 @@ async def helpme(ctx):
                 ("!browse_games",
                  "List recorded games for the current season, most recent first."),
                 ("!edit_game <game_label> [new_match_or_url]",
-                 f"Re-import/replace a stored game label via API. {admin_only}"),
+                 "Re-import/replace a stored game label via API."),
                 ("!undo_last_game",
-                 f"Delete the most recently imported game in the current season. {admin_only}"),
+                 "Delete the most recently imported game in the current season."),
                 ("!delete_game <game_label>",
-                 f"Delete a game and create a DELETED tombstone so auto-import does not bring it back. {admin_only}"),
+                 "Delete a game and create a DELETED tombstone so auto-import does not bring it back."),
                 ("!undelete_match <match_uid>",
-                 f"Remove a DELETED tombstone so the match can be imported again if discoverable. {admin_only}"),
+                 "Remove a DELETED tombstone so the match can be imported again if discoverable."),
             ],
         ),
         (
             "🤖 Manual Auto Import",
             [
                 ("!auto_import_run [days=4] [refresh] [reset_cursor]",
-                 f"Manual recent-match import. Default is no roster refresh, one recent page per player/API season, and cursor-based skipping. {admin_only}"),
+                 "Manual recent-match import. Default is no roster refresh, one recent page per player/API season, and cursor-based skipping."),
                 ("!auto_import_status",
                  "Show manual-import settings, cutoff, last run summary, and API seasons scanned."),
                 ("!auto_import_cutoff [YYYY-MM-DD]",
-                 f"Show or set the Brisbane-date import cutoff floor. {admin_only} when setting."),
+                 "Show or set the Brisbane-date import cutoff floor."),
                 ("!auto_import_debug <player_uid>",
-                 f"Debug why recent matches are/aren’t importing for a UID. {admin_only}"),
+                 "Debug why recent matches are/aren’t importing for a UID."),
                 ("!match_history_probe <player_uid> [pages] [step] [season] [game_mode]",
-                 f"Probe raw match-history paging/rate-limit behaviour. {admin_only}"),
+                 "Probe raw match-history paging/rate-limit behaviour."),
                 ("!skipped_draws [limit]",
                  "List matches skipped because they were detected as draws."),
                 ("!auto_import_on / !auto_import_off",
-                 f"Legacy compatibility flag only; background polling is disabled in this build. {admin_only}"),
+                 "Legacy compatibility flag only; background polling is disabled in this build."),
             ],
         ),
         (
@@ -23595,15 +23733,15 @@ async def helpme(ctx):
                 ("!roster_list",
                  "Show the enabled import roster UIDs."),
                 ("!roster_add <player_uid> [name]",
-                 f"Add/enable a roster UID. {admin_only}"),
+                 "Add/enable a roster UID."),
                 ("!roster_remove <player_uid>",
-                 f"Disable a roster UID. {admin_only}"),
+                 "Disable a roster UID."),
                 ("!roster_update_all",
-                 f"Queue API-side refresh for all enabled roster UIDs. Use sparingly. {admin_only}"),
+                 "Queue API-side refresh for all enabled roster UIDs. Use sparingly."),
                 ("!season_windows",
                  "Show configured Brisbane-time season windows used by auto-import routing."),
                 ("!season_window_set <season_id> <start> <end|OPEN> [note=...]",
-                 f"Set a Brisbane-time season window. {admin_only}"),
+                 "Set a Brisbane-time season window."),
             ],
         ),
         (
@@ -23614,9 +23752,9 @@ async def helpme(ctx):
                 ("!list_seasons",
                  "List seasons and game counts."),
                 ("!set_season <season_id>",
-                 f"Switch active season. {admin_only}"),
+                 "Switch active season."),
                 ("!reset_season [season_id]",
-                 f"Start/switch to a new season while preserving old seasons. {admin_only}"),
+                 "Start/switch to a new season while preserving old seasons."),
             ],
         ),
         (
@@ -23656,13 +23794,13 @@ async def helpme(ctx):
                 ("!player_bans",
                  "Enemy-ban stats against each player."),
                 ("!refresh_heroes",
-                 f"Force refresh hero name/role cache from the API. {admin_only}"),
+                 "Force refresh hero name/role cache from the API."),
                 ("!hero_roles_check",
                  "Audit hero role coverage in hero_cache."),
                 ("!hero_role_set <hero_id> <role>",
-                 f"Manually set a hero role in hero_cache. {admin_only}"),
+                 "Manually set a hero role in hero_cache."),
                 ("!backfill_hero_dht [season]",
-                 f"Backfill per-hero damage/heal/taken from stored raw match JSON. {admin_only}"),
+                 "Backfill per-hero damage/heal/taken from stored raw match JSON."),
             ],
         ),
         (
@@ -23705,7 +23843,7 @@ async def helpme(ctx):
             "🧪 Diagnostics / Maintenance",
             [
                 ("!mr_cleanup_orphans",
-                 f"Clean orphaned rows in convenience tables. {admin_only}"),
+                 "Clean orphaned rows in convenience tables."),
                 ("!helpme",
                  "Show this command guide."),
             ],
@@ -23944,6 +24082,224 @@ try:
     globals()["_get_all_players"] = _get_all_players_roster_first
 except Exception:
     pass
+
+# =====================================================================================
+# SEASON-ONLY PATCH: 
+# Paste near the end of the file, ABOVE: if __name__ == "__main__":
+# Delete this whole block when you want to remove the feature.
+# =====================================================================================
+
+LATIN_TEAM_DUELIST_PATCH_ENABLED = True
+
+LATIN_TEAM_DUELIST_PATCH_LATIN_UID = 64511620          # 064511620
+LATIN_TEAM_DUELIST_PATCH_HAROLD_UID = 903452137        # xX_Harold_Xx
+LATIN_TEAM_DUELIST_PATCH_FAND_UID = 2092848953         # Fandangleberry
+
+LATIN_TEAM_DUELIST_PATCH_SINGLE_KEEP_OFF_DUELIST_CHANCE = 1.00
+
+_LATIN_TEAM_DUELIST_PATCH_ROLE_EMOJIS = ("🛡️", "⚔️", "✚")
+
+
+def _latin_team_duelist_patch_pick_non_duelist(pkey: str, session) -> str:
+    """
+    Pick a non-Duelist replacement ban while staying as close as possible to the
+    existing role-ban maths for that player.
+    """
+    dbg = {}
+    try:
+        dbg = (getattr(session, "last_debug", None) or {}).get("restricted_roles_math", {}) or {}
+    except Exception:
+        dbg = {}
+
+    shares = {}
+    try:
+        shares = dict((dbg.get(pkey) or {}).get("shares") or {})
+    except Exception:
+        shares = {}
+
+    candidates = ["Vanguard", "Strategist"]
+    weights = [max(0.0, float(shares.get(r, 0.0) or 0.0)) for r in candidates]
+
+    if sum(weights) > 0.0:
+        try:
+            return random.choices(candidates, weights=weights, k=1)[0]
+        except Exception:
+            pass
+
+    return random.choice(candidates)
+
+
+def _latin_team_duelist_patch_preserve_extra_emojis(existing_inside: str) -> str:
+    """
+    Keeps any extra non-role emoji already inside the brackets, e.g. a seasonal 💻 patch.
+    """
+    s = str(existing_inside or "")
+    for emo in _LATIN_TEAM_DUELIST_PATCH_ROLE_EMOJIS:
+        s = s.replace(emo, "")
+    return s.replace(" ", "")
+
+
+def _latin_team_duelist_patch_replace_player_restriction(
+    content: str,
+    display_name: str,
+    new_role: str,
+) -> str:
+    """
+    Replace:
+      DisplayName (⚔️)
+    with:
+      DisplayName (🛡️)
+    while preserving any extra suffix emoji already in the brackets.
+    """
+    if not content or not display_name:
+        return content
+
+    pattern = rf"{re.escape(display_name)} \(([^)]*)\)"
+
+    def _repl(match):
+        inside = match.group(1) or ""
+        extras = _latin_team_duelist_patch_preserve_extra_emojis(inside)
+        return f"{display_name} ({_nt_role_emoji(new_role)}{extras})"
+
+    new_content, _ = re.subn(pattern, _repl, content, count=1)
+    return new_content
+
+
+async def _latin_team_duelist_patch_apply(channel, key: tuple[int, int]):
+    """
+    Hidden post-roll patch:
+      - If both Harold and Fandangleberry are on LatinMaestro's team, ensure at least
+        one of them is NOT on a Duelist ban.
+      - If only one of them is on LatinMaestro's team, there is an 80% chance that
+        they will NOT be on a Duelist ban.
+      - If neither is on LatinMaestro's team, do nothing.
+
+    This deliberately runs AFTER the real next-teams roll so the existing team
+    generation calculation stays untouched.
+    """
+    if not LATIN_TEAM_DUELIST_PATCH_ENABLED:
+        return
+
+    session = SESSION_STATES.get(key)
+    if not session:
+        return
+
+    pending = getattr(session, "pending_roll_data", None)
+    if not isinstance(pending, dict) or not pending:
+        return
+
+    restricted_roles = dict(pending.get("restricted_roles") or {})
+    if not restricted_roles:
+        return
+
+    team_a = set(pending.get("team_a") or [])
+    team_b = set(pending.get("team_b") or [])
+
+    latin_pkey = _pkey_from_uid(LATIN_TEAM_DUELIST_PATCH_LATIN_UID)
+    harold_pkey = _pkey_from_uid(LATIN_TEAM_DUELIST_PATCH_HAROLD_UID)
+    fand_pkey = _pkey_from_uid(LATIN_TEAM_DUELIST_PATCH_FAND_UID)
+
+    latin_team = None
+    if latin_pkey in team_a:
+        latin_team = set(team_a)
+    elif latin_pkey in team_b:
+        latin_team = set(team_b)
+
+    if not latin_team:
+        return
+
+    tracked_on_latin_team = [p for p in (harold_pkey, fand_pkey) if p in latin_team]
+    if not tracked_on_latin_team:
+        return
+
+    changed_players = []
+
+    # Case 1: only one of the tracked players is on Latin's team
+    if len(tracked_on_latin_team) == 1:
+        p = tracked_on_latin_team[0]
+        if restricted_roles.get(p) == "Duelist":
+            if random.random() < float(LATIN_TEAM_DUELIST_PATCH_SINGLE_KEEP_OFF_DUELIST_CHANCE):
+                restricted_roles[p] = _latin_team_duelist_patch_pick_non_duelist(p, session)
+                changed_players.append(p)
+
+    # Case 2: both tracked players are on Latin's team
+    else:
+        duelists = [p for p in tracked_on_latin_team if restricted_roles.get(p) == "Duelist"]
+
+        # Only intervene if BOTH are currently Duelist-banned.
+        if len(duelists) >= 2:
+            p_change = random.choice(duelists)
+            restricted_roles[p_change] = _latin_team_duelist_patch_pick_non_duelist(p_change, session)
+            changed_players.append(p_change)
+
+    if not changed_players:
+        return
+
+    # Persist the adjusted hidden restrictions into the pending roll
+    pending["restricted_roles"] = dict(restricted_roles)
+    session.pending_roll_data = pending
+
+    try:
+        if isinstance(session.last_debug, dict):
+            session.last_debug["restricted_roles"] = dict(restricted_roles)
+    except Exception:
+        pass
+
+    try:
+        _save_session_state(key, session)
+    except Exception:
+        pass
+
+    # Quietly update the already-sent Discord message so the displayed emoji matches
+    message_id = getattr(session, "pending_roll_message_id", None)
+    if not message_id:
+        return
+
+    try:
+        msg = await channel.fetch_message(int(message_id))
+    except Exception:
+        return
+
+    old_content = msg.content or ""
+    new_content = old_content
+
+    for p in changed_players:
+        display_name = str((getattr(session, "display_name_map", {}) or {}).get(p, p) or p).strip()
+        new_role = restricted_roles.get(p)
+        new_content = _latin_team_duelist_patch_replace_player_restriction(
+            new_content,
+            display_name,
+            new_role,
+        )
+
+    if new_content != old_content:
+        try:
+            await msg.edit(content=new_content)
+        except Exception:
+            pass
+
+
+# Wrap the existing next-teams function so this season-only rule lives entirely here
+try:
+    _LATIN_TEAM_DUELIST_PATCH_ORIG_RUN_NEXT_TEAMS_ROLL = _run_next_teams_roll
+except Exception:
+    _LATIN_TEAM_DUELIST_PATCH_ORIG_RUN_NEXT_TEAMS_ROLL = None
+
+
+async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending: bool):
+    if _LATIN_TEAM_DUELIST_PATCH_ORIG_RUN_NEXT_TEAMS_ROLL is None:
+        return
+
+    await _LATIN_TEAM_DUELIST_PATCH_ORIG_RUN_NEXT_TEAMS_ROLL(
+        channel,
+        key,
+        commit_pending=commit_pending,
+    )
+
+    try:
+        await _latin_team_duelist_patch_apply(channel, key)
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     # Replit-style keep-alive/web monitor is optional. On DigitalOcean, leave
