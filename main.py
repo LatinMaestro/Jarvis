@@ -2181,11 +2181,10 @@ AUTO_IMPORT_DETAIL_REQUEST_DELAY = float(os.getenv("AUTO_IMPORT_DETAIL_REQUEST_D
 # used below to avoid re-queueing the same player over and over.
 AUTO_IMPORT_REFRESH_ROSTER_DEFAULT = os.getenv("AUTO_IMPORT_REFRESH_ROSTER_DEFAULT", "true").strip().lower() in ("1", "true", "yes", "on")
 AUTO_IMPORT_PLAYER_UPDATE_COOLDOWN_MINUTES = int(os.getenv("AUTO_IMPORT_PLAYER_UPDATE_COOLDOWN_MINUTES", "31"))
-AUTO_IMPORT_POST_REFRESH_WAIT_SECONDS = float(os.getenv("AUTO_IMPORT_POST_REFRESH_WAIT_SECONDS", "45"))
+AUTO_IMPORT_POST_REFRESH_WAIT_SECONDS = float(os.getenv("AUTO_IMPORT_POST_REFRESH_WAIT_SECONDS", "180"))
 AUTO_IMPORT_UPDATE_CONCURRENCY = int(os.getenv("AUTO_IMPORT_UPDATE_CONCURRENCY", "1"))
 AUTO_IMPORT_UPDATE_REQUEST_DELAY = float(os.getenv("AUTO_IMPORT_UPDATE_REQUEST_DELAY", "0.75"))
-AUTO_IMPORT_USE_HISTORY_V2 = os.getenv("AUTO_IMPORT_USE_HISTORY_V2", "false").strip().lower() in ("1", "true", "yes", "on")
-AUTO_IMPORT_SCAN_ROSTER_NAMES = os.getenv("AUTO_IMPORT_SCAN_ROSTER_NAMES", "true").strip().lower() in ("1", "true", "yes", "on")
+AUTO_IMPORT_USE_HISTORY_V2 = os.getenv("AUTO_IMPORT_USE_HISTORY_V2", "true").strip().lower() in ("1", "true", "yes", "on")
 AUTO_IMPORT_MATCH_DETAIL_RETRY_ATTEMPTS = int(os.getenv("AUTO_IMPORT_MATCH_DETAIL_RETRY_ATTEMPTS", "4"))
 AUTO_IMPORT_MATCH_DETAIL_RETRY_BASE_SECONDS = float(os.getenv("AUTO_IMPORT_MATCH_DETAIL_RETRY_BASE_SECONDS", "1.5"))
 AUTO_IMPORT_API_SEASONS_ENV = os.getenv("AUTO_IMPORT_API_SEASONS", "").strip()
@@ -2394,10 +2393,17 @@ def _auto_import_refresh_summary_text(summary: dict | None) -> str:
     skipped = int(summary.get("skipped_cooldown") or 0)
     failed = int(summary.get("failed") or 0)
     waited = int(float(summary.get("waited_seconds") or 0))
-    return (
+    txt = (
         f"player_updates_queued={queued}/{total} "
         f"cooldown_skips={skipped} update_failed={failed} wait_s={waited}"
     )
+    failures = summary.get("failures") or []
+    if failures:
+        bits = []
+        for item in failures[:3]:
+            bits.append(f"{item.get('uid')}:{str(item.get('error') or '')[:80]}")
+        txt += " update_failures=[" + " | ".join(bits) + "]"
+    return txt
 
 
 def _normalise_camp_key(camp):
@@ -2642,59 +2648,25 @@ def _roster_uids_and_names() -> tuple[set[int], set[str]]:
     return uids, names
 
 
-def _roster_query_terms(include_names: bool = True) -> list[str]:
+def _roster_update_query_map() -> dict[int, str]:
     """
-    API discovery queries for enabled roster players.
+    Returns active roster UID -> player display name for the player-update queue.
 
-    UID is still the primary lookup, but name lookups are also useful when the
-    API has stale/partial UID history after a player update or rename. The list
-    is de-duplicated while preserving UID-first order.
+    The MarvelRivalsAPI update endpoint accepts a UID or username in the path.
+    Some API-side failures have been observed when queueing by UID only, so the
+    refresh step now tries the UID first and falls back to the stored player name
+    before treating the refresh as failed.
     """
     ensure_auto_import_tables()
-    terms: list[str] = []
-    seen: set[str] = set()
-
-    c.execute("SELECT player_uid, player_name FROM mr_roster WHERE enabled=1 ORDER BY player_uid ASC")
-    rows = c.fetchall()
-
-    for uid, _nm in rows:
-        if uid is None:
+    c.execute("SELECT player_uid, player_name FROM mr_roster WHERE enabled=1")
+    out: dict[int, str] = {}
+    for uid, nm in c.fetchall():
+        try:
+            i = int(uid)
+        except Exception:
             continue
-        q = str(uid).strip()
-        if q and q.lower() not in seen:
-            terms.append(q)
-            seen.add(q.lower())
-
-    if include_names:
-        for _uid, nm in rows:
-            q = str(nm or "").strip()
-            if q and q.lower() not in seen:
-                terms.append(q)
-                seen.add(q.lower())
-
-    if not terms and ROSTER_NAMES_FALLBACK:
-        for nm in sorted(ROSTER_NAMES_FALLBACK):
-            q = str(nm or "").strip()
-            if q and q.lower() not in seen:
-                terms.append(q)
-                seen.add(q.lower())
-
-    return terms
-
-
-def _roster_update_queries(include_names: bool = False) -> list[str]:
-    """
-    Queries used for the API update endpoint.
-
-    By default this remains UID-only because MarvelRivalsAPI's update endpoint
-    is queue/lock based. Set AUTO_IMPORT_UPDATE_BY_NAME=true only if UID updates
-    are not refreshing histories for renamed players.
-    """
-    include_names = include_names or (
-        os.getenv("AUTO_IMPORT_UPDATE_BY_NAME", "false").strip().lower()
-        in ("1", "true", "yes", "on")
-    )
-    return _roster_query_terms(include_names=include_names)
+        out[i] = str(nm).strip() if nm else ""
+    return out
 
 
 def _is_roster_human(player_uid, player_name, roster_uids: set[int],
@@ -2863,38 +2835,38 @@ async def _trigger_player_update(query: str, session: "aiohttp.ClientSession") -
 
 async def _update_roster_players_trigger(
     *,
-    roster_uids: list[int] | None = None,
-    queries: list[str] | None = None,
+    roster_uids: list[int],
+    roster_names_by_uid: dict[int, str] | None = None,
     ctx: "commands.Context" = None,
     concurrency: int | None = None,
     per_call_delay_s: float | None = None,
     force: bool = False,
 ) -> dict:
     """
-    Triggers player update for roster players.
+    Triggers player update for each roster uid, falling back to the stored
+    player name if the UID refresh fails.
 
     The API-side update endpoint is queue/lock based, so this function applies
-    a local per-query cooldown unless force=True. This prevents repeated
+    a local per-player cooldown unless force=True. This prevents repeated
     !auto_import_run attempts from pushing players to the back of the API queue.
     """
     if aiohttp is None:
         raise RuntimeError("aiohttp missing; cannot call API.")
 
-    raw_queries: list[str] = []
-    if queries is not None:
-        raw_queries.extend([str(q).strip() for q in queries if str(q or "").strip()])
-    else:
-        raw_queries.extend([str(uid).strip() for uid in (roster_uids or []) if str(uid or "").strip()])
+    unique_uids = []
+    seen = set()
+    for uid in roster_uids or []:
+        try:
+            i = int(uid)
+        except Exception:
+            continue
+        if i not in seen:
+            unique_uids.append(i)
+            seen.add(i)
 
-    unique_queries: list[str] = []
-    seen: set[str] = set()
-    for q in raw_queries:
-        key = q.lower()
-        if key and key not in seen:
-            unique_queries.append(q)
-            seen.add(key)
+    roster_names_by_uid = roster_names_by_uid or {}
 
-    if not unique_queries:
+    if not unique_uids:
         return {
             "total": 0,
             "queued": 0,
@@ -2903,17 +2875,17 @@ async def _update_roster_players_trigger(
             "failures": [],
         }
 
-    due_queries = []
+    due_uids = []
     cooldown_skips = []
-    for q in unique_queries:
-        due, remaining = _player_update_due(q, force=force)
+    for uid in unique_uids:
+        due, remaining = _player_update_due(uid, force=force)
         if due:
-            due_queries.append(q)
+            due_uids.append(uid)
         else:
-            cooldown_skips.append({"query": q, "remaining_seconds": remaining})
+            cooldown_skips.append({"uid": uid, "remaining_seconds": remaining})
 
     results = {
-        "total": len(unique_queries),
+        "total": len(unique_uids),
         "queued": 0,
         "failed": 0,
         "skipped_cooldown": len(cooldown_skips),
@@ -2921,7 +2893,7 @@ async def _update_roster_players_trigger(
         "failures": [],
     }
 
-    if not due_queries:
+    if not due_uids:
         if ctx is not None:
             await ctx.send(
                 f"Roster refresh skipped by local cooldown: **{results['skipped_cooldown']}** / **{results['total']}**."
@@ -2934,27 +2906,41 @@ async def _update_roster_players_trigger(
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
 
-        async def _one(q: str):
+        async def _one(uid: int):
             async with sem:
-                backoff = 1.2
-                for attempt in range(1, 5):  # 4 attempts max
-                    try:
-                        await _trigger_player_update(str(q), session)
-                        _set_player_update_last_utc(q)
-                        results["queued"] += 1
-                        await asyncio.sleep(delay_s)
-                        return
-                    except Exception as e:
-                        msg = str(e)
-                        if "RATE_LIMIT_429" in msg and attempt < 4:
-                            await asyncio.sleep(backoff)
-                            backoff *= 1.8
-                            continue
-                        results["failed"] += 1
-                        results["failures"].append({"query": q, "error": msg[:200]})
-                        return
+                display_name = str((roster_names_by_uid or {}).get(uid) or "").strip()
+                queries_to_try = [str(uid)]
+                if display_name and display_name not in queries_to_try:
+                    queries_to_try.append(display_name)
 
-        tasks_ = [asyncio.create_task(_one(q)) for q in due_queries]
+                last_error = ""
+                for query in queries_to_try:
+                    backoff = 1.2
+                    for attempt in range(1, 5):  # 4 attempts max per query form
+                        try:
+                            await _trigger_player_update(query, session)
+                            _set_player_update_last_utc(uid)
+                            results["queued"] += 1
+                            await asyncio.sleep(delay_s)
+                            return
+                        except Exception as e:
+                            msg = str(e)
+                            last_error = f"{query}: {msg}"
+                            if "RATE_LIMIT_429" in msg and attempt < 4:
+                                await asyncio.sleep(backoff)
+                                backoff *= 1.8
+                                continue
+                            break
+
+                results["failed"] += 1
+                results["failures"].append({
+                    "uid": uid,
+                    "name": display_name,
+                    "error": last_error[:260],
+                })
+                return
+
+        tasks_ = [asyncio.create_task(_one(uid)) for uid in due_uids]
         await asyncio.gather(*tasks_)
 
     if ctx is not None:
@@ -2964,7 +2950,7 @@ async def _update_roster_players_trigger(
         )
         if results["failed"] > 0:
             sample = results["failures"][:8]
-            lines = [f"- {x['query']}: {x['error']}" for x in sample]
+            lines = [f"- {x['uid']} {x.get('name', '')}: {x['error']}" for x in sample]
             await ctx.send("Some refresh failures:\n" + "\n".join(lines))
 
     return results
@@ -3455,7 +3441,7 @@ def _parse_auto_import_run_args(args) -> dict:
     """Parse optional !auto_import_run arguments without breaking the existing command."""
     opts = {
         "lookback_days": int(AUTO_IMPORT_MAX_LOOKBACK_DAYS),
-        "refresh_roster": True,
+        "refresh_roster": bool(AUTO_IMPORT_REFRESH_ROSTER_DEFAULT),
         "force_refresh": False,
         "reset_cursor": False,
     }
@@ -3541,13 +3527,12 @@ async def _auto_import_tick(
         cutoff_utc = _effective_auto_import_cutoff_utc(lookback_days)
         cutoff_txt = cutoff_utc.astimezone(BRIS_TZ).strftime("%Y-%m-%d %H:%M")
 
-        queries = _roster_query_terms(include_names=bool(AUTO_IMPORT_SCAN_ROSTER_NAMES))
-        if not queries:
-            _status("No roster queries", "no UID/name query terms available (skipping)")
-            return
-        uid_count = len([q for q in queries if str(q).isdigit()])
-        name_count = len(queries) - uid_count
-        query_mode = f"uid+name scan ({uid_count} UID, {name_count} name)"
+        if roster_uids:
+            queries = [str(uid) for uid in sorted(roster_uids)]
+            query_mode = "uids"
+        else:
+            queries = [nm for nm in sorted(ROSTER_NAMES_FALLBACK)]
+            query_mode = "names(fallback)"
 
         api_seasons = _get_auto_import_api_seasons()
         imported_count = 0
@@ -3561,7 +3546,8 @@ async def _auto_import_tick(
             )
             try:
                 refresh_summary = await _update_roster_players_trigger(
-                    queries=_roster_update_queries(include_names=False),
+                    roster_uids=list(sorted(roster_uids)),
+                    roster_names_by_uid=_roster_update_query_map(),
                     ctx=None,
                     concurrency=AUTO_IMPORT_UPDATE_CONCURRENCY,
                     per_call_delay_s=AUTO_IMPORT_UPDATE_REQUEST_DELAY,
@@ -3602,7 +3588,6 @@ async def _auto_import_tick(
             "details_429": 0,
             "details_err": 0,
             "cursor_updates": 0,
-            "min_humans_examples": [],
         }
 
         _status(
@@ -3777,11 +3762,6 @@ async def _auto_import_tick(
                             try:
                                 if not _passes_min_humans_each_team(payload):
                                     counters["skip_min_humans"] += 1
-                                    if len(counters["min_humans_examples"]) < 3:
-                                        b = _min_humans_breakdown(payload)
-                                        counters["min_humans_examples"].append(
-                                            f"{match_uid}: team1={b.get(1, 0)}, team2={b.get(2, 0)}"
-                                        )
                                     continue
                             except Exception:
                                 continue
@@ -3854,7 +3834,6 @@ async def _auto_import_tick(
             f"deleted={counters['skip_deleted']} draws={counters['skip_draw_pre'] + counters['skip_draw_post']} min_humans={counters['skip_min_humans']} "
             f"429(history)={counters['api_429']} 429(details)={counters['details_429']} "
             f"errors(history)={counters['api_err']} errors(details)={counters['details_err']} cursor_updates={counters['cursor_updates']}"
-            + (f" min_humans_examples={'; '.join(counters.get('min_humans_examples') or [])}" if counters.get("min_humans_examples") else "")
             + (f" {refresh_txt}" if refresh_txt else "")
         )
 
@@ -4889,6 +4868,7 @@ async def auto_import_status(ctx):
         "Auto import background loop: **OFF** (manual only)\n"
         f"Legacy enabled flag: **{'ON' if enabled else 'OFF'}** • Last run: {last} • Last imported: {last_n}\n"
         f"Cutoff floor: **{cutoff} Brisbane** • Default lookback: **{AUTO_IMPORT_MAX_LOOKBACK_DAYS} day(s)** • API seasons: **{api_seasons}**\n"
+        f"History API: **{'v2 preferred' if AUTO_IMPORT_USE_HISTORY_V2 else 'v1 only'}** • Require custom: **{AUTO_IMPORT_REQUIRE_CUSTOM}** • Post-refresh wait: **{int(AUTO_IMPORT_POST_REFRESH_WAIT_SECONDS)}s**\n"
         f"Last summary: `{summary}`"
     )
 
