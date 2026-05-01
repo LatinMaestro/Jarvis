@@ -1283,7 +1283,7 @@ def upsert_match_into_mr_tables(*, season_id: int, game_label: str, payload: dic
             (
                 season_id, str(match_uid), game_label,
                 uid_i, player_name, bot_flag,
-                p.get("player_icon"), _normalise_camp_key(p.get("camp")),
+                p.get("player_icon"), p.get("camp"),
                 p.get("cur_hero_id"), p.get("cur_hero_icon"), is_win_flag,
                 _safe_int(p.get("kills"), 0),
                 _safe_int(p.get("deaths"), 0),
@@ -2176,8 +2176,7 @@ AUTO_IMPORT_HISTORY_PAGE_SIZE = int(os.getenv("AUTO_IMPORT_HISTORY_PAGE_SIZE", "
 AUTO_IMPORT_MAX_HISTORY_PAGES = int(os.getenv("AUTO_IMPORT_MAX_HISTORY_PAGES", "2"))
 AUTO_IMPORT_HISTORY_REQUEST_DELAY = float(os.getenv("AUTO_IMPORT_HISTORY_REQUEST_DELAY", "0.35"))
 AUTO_IMPORT_DETAIL_REQUEST_DELAY = float(os.getenv("AUTO_IMPORT_DETAIL_REQUEST_DELAY", "0.25"))
-# Refresh roster/player API data before manual imports by default.
-AUTO_IMPORT_REFRESH_ROSTER_DEFAULT = os.getenv("AUTO_IMPORT_REFRESH_ROSTER_DEFAULT", "true").strip().lower() in ("1", "true", "yes", "on")
+AUTO_IMPORT_REFRESH_ROSTER_DEFAULT = os.getenv("AUTO_IMPORT_REFRESH_ROSTER_DEFAULT", "false").strip().lower() in ("1", "true", "yes", "on")
 AUTO_IMPORT_API_SEASONS_ENV = os.getenv("AUTO_IMPORT_API_SEASONS", "").strip()
 
 # Minimum humans per team (humans = roster players)
@@ -2340,106 +2339,6 @@ def _set_setting(key: str, value: str):
         ON CONFLICT(k) DO UPDATE SET v=excluded.v
     """, (key, str(value)))
     conn.commit()
-
-
-def _player_update_setting_key(uid: int | str) -> str:
-    return f"auto_import_player_update_last_utc:{str(uid).strip()}"
-
-
-def _get_player_update_last_utc(uid: int | str) -> datetime | None:
-    raw = _get_setting(_player_update_setting_key(uid), None)
-    return _parse_iso_utc(raw) if raw else None
-
-
-def _set_player_update_last_utc(uid: int | str):
-    _set_setting(_player_update_setting_key(uid), _now_iso_utc())
-
-
-def _player_update_due(uid: int | str, *, force: bool = False) -> tuple[bool, int]:
-    """
-    Returns (is_due, remaining_seconds).
-
-    The MarvelRivalsAPI player update endpoint is queue/lock based. Re-queueing
-    the same player too often can make the API-side data take longer to refresh,
-    so the bot keeps a local cooldown per UID.
-    """
-    if force:
-        return True, 0
-
-    last = _get_player_update_last_utc(uid)
-    if last is None:
-        return True, 0
-
-    cooldown_s = max(0, int(AUTO_IMPORT_PLAYER_UPDATE_COOLDOWN_MINUTES * 60))
-    elapsed_s = int((datetime.now(timezone.utc) - last).total_seconds())
-    remaining = max(0, cooldown_s - elapsed_s)
-    return remaining <= 0, remaining
-
-
-def _auto_import_refresh_summary_text(summary: dict | None) -> str:
-    if not summary:
-        return ""
-    total = int(summary.get("total") or 0)
-    queued = int(summary.get("queued") or 0)
-    skipped = int(summary.get("skipped_cooldown") or 0)
-    failed = int(summary.get("failed") or 0)
-    waited = int(float(summary.get("waited_seconds") or 0))
-    txt = (
-        f"player_updates_queued={queued}/{total} "
-        f"cooldown_skips={skipped} update_failed={failed} wait_s={waited}"
-    )
-    failures = summary.get("failures") or []
-    if failures:
-        bits = []
-        for item in failures[:3]:
-            bits.append(f"{item.get('uid')}:{str(item.get('error') or '')[:80]}")
-        txt += " update_failures=[" + " | ".join(bits) + "]"
-    return txt
-
-
-def _normalise_camp_key(camp):
-    """
-    Normalise API camp/team values for comparisons and DB storage.
-
-    The API documentation examples use string camps such as 'A', while live
-    payloads may use 0/1 or 1/2. Internally, store the first team as 0 and the
-    second team as 1 where the value can be recognised.
-    """
-    if camp is None:
-        return None
-
-    try:
-        # bool is a subclass of int; treat it as numeric if it appears.
-        i = int(camp)
-        if i in (0, 1):
-            return i
-        if i == 2:
-            return 1
-        return i
-    except Exception:
-        pass
-
-    s = str(camp).strip().lower()
-    if not s:
-        return None
-
-    if s in ("a", "alpha", "blue", "home", "team0", "team_0", "team 0", "0"):
-        return 0
-    if s in ("b", "bravo", "red", "away", "team1", "team_1", "team 1", "1"):
-        return 1
-    if s in ("team2", "team_2", "team 2", "2"):
-        return 1
-
-    return s
-
-
-def _camp_display_value(camp) -> str:
-    k = _normalise_camp_key(camp)
-    if k == 0:
-        return "Team 0"
-    if k == 1:
-        return "Team 1"
-    return "Unknown"
 
 
 def _is_auto_import_enabled() -> bool:
@@ -2637,27 +2536,6 @@ def _roster_uids_and_names() -> tuple[set[int], set[str]]:
         names |= {_norm_name_simple(x) for x in ROSTER_NAMES_FALLBACK}
 
     return uids, names
-
-
-def _roster_update_query_map() -> dict[int, str]:
-    """
-    Returns active roster UID -> player display name for the player-update queue.
-
-    The MarvelRivalsAPI update endpoint accepts a UID or username in the path.
-    Some API-side failures have been observed when queueing by UID only, so the
-    refresh step now tries the UID first and falls back to the stored player name
-    before treating the refresh as failed.
-    """
-    ensure_auto_import_tables()
-    c.execute("SELECT player_uid, player_name FROM mr_roster WHERE enabled=1")
-    out: dict[int, str] = {}
-    for uid, nm in c.fetchall():
-        try:
-            i = int(uid)
-        except Exception:
-            continue
-        out[i] = str(nm).strip() if nm else ""
-    return out
 
 
 def _is_roster_human(player_uid, player_name, roster_uids: set[int],
@@ -3010,12 +2888,10 @@ def _passes_min_humans_each_team(payload: dict) -> bool:
     - Only import games with roster participation:
         * at least MIN_ROSTER_HUMANS_TOTAL rostered players overall
         * at least MIN_ROSTER_HUMANS_PER_TEAM rostered players on each of the 2 teams
-
-    Camp values are normalised because the API may return camps as 0/1, 1/2,
-    or strings such as A/B.
     """
     roster_uids, roster_names_norm = _roster_uids_and_names()
     if not roster_uids and not roster_names_norm:
+        # Without roster, cannot enforce reliably.
         return False
 
     md = (payload or {}).get("match_details") or {}
@@ -3040,65 +2916,29 @@ def _passes_min_humans_each_team(payload: dict) -> bool:
         if not _is_roster_human(uid, name, roster_uids, roster_names_norm):
             continue
 
-        camp_key = _normalise_camp_key(p.get("camp"))
-        if camp_key is None:
+        camp = p.get("camp")
+        if camp is None:
+            continue
+        try:
+            camp_i = int(camp)
+        except Exception:
             continue
 
-        roster_humans_by_team[camp_key] += 1
+        roster_humans_by_team[camp_i] += 1
         roster_humans_total += 1
 
+    # Need exactly two teams represented by rostered players
     teams = [t for t, ct in roster_humans_by_team.items() if ct > 0]
     if len(teams) != 2:
         return False
 
+    # Total rostered players requirement
     if roster_humans_total < int(MIN_ROSTER_HUMANS_TOTAL):
         return False
 
+    # Minimum rostered players per team requirement
     return all(roster_humans_by_team[t] >= int(MIN_ROSTER_HUMANS_PER_TEAM)
                for t in teams)
-
-
-def _min_humans_breakdown(payload: dict) -> str:
-    """
-    Short diagnostic used by auto_import_debug when a match is rejected by the
-    roster-human/team filter.
-    """
-    roster_uids, roster_names_norm = _roster_uids_and_names()
-    md = (payload or {}).get("match_details") or {}
-    players = md.get("match_players") or []
-    by_team = defaultdict(list)
-    roster_total = 0
-    unknown_camp = 0
-
-    if not isinstance(players, list):
-        players = []
-
-    for p in players:
-        if not isinstance(p, dict) or _is_bot_player(p):
-            continue
-
-        uid = p.get("player_uid")
-        name = str(
-            p.get("nick_name") or p.get("nickname") or p.get("player_name")
-            or p.get("player") or uid or "unknown"
-        ).strip()
-
-        if not _is_roster_human(uid, name, roster_uids, roster_names_norm):
-            continue
-
-        roster_total += 1
-        camp_key = _normalise_camp_key(p.get("camp"))
-        if camp_key is None:
-            unknown_camp += 1
-            continue
-        by_team[camp_key].append(name)
-
-    parts = [f"roster_total={roster_total}"]
-    for team_key in sorted(by_team.keys(), key=lambda x: str(x)):
-        parts.append(f"{_camp_display_value(team_key)}={len(by_team[team_key])}")
-    if unknown_camp:
-        parts.append(f"unknown_camp={unknown_camp}")
-    return " ".join(parts)
 
 
 # -------------------------
@@ -3320,7 +3160,6 @@ def _parse_auto_import_run_args(args) -> dict:
     opts = {
         "lookback_days": int(AUTO_IMPORT_MAX_LOOKBACK_DAYS),
         "refresh_roster": bool(AUTO_IMPORT_REFRESH_ROSTER_DEFAULT),
-        "force_refresh": False,
         "reset_cursor": False,
     }
     for raw in args or []:
@@ -3329,9 +3168,6 @@ def _parse_auto_import_run_args(args) -> dict:
             continue
         if a in ("refresh", "--refresh", "update", "--update"):
             opts["refresh_roster"] = True
-        elif a in ("force_refresh", "force-refresh", "--force-refresh", "refresh_force", "refresh-force", "--refresh-force"):
-            opts["refresh_roster"] = True
-            opts["force_refresh"] = True
         elif a in ("no_refresh", "no-refresh", "--no-refresh", "norefresh"):
             opts["refresh_roster"] = False
         elif a in ("reset_cursor", "reset-cursor", "--reset-cursor", "reset"):
@@ -4873,12 +4709,12 @@ async def auto_import_run(ctx, *args):
             )
         )
 
-        # Roster refresh is automatic by default so the import flow matches the old Replit behaviour.
-        # Use `no_refresh` only when you deliberately want to skip the player-update queue step.
+        # Roster refresh is no longer automatic because it is one API call per roster player.
+        # Run `!auto_import_run refresh` only when you specifically need to queue API-side player refreshes first.
         if opts.get("refresh_roster") and roster_uids:
             roster_uid_list = sorted(list(roster_uids))
             _status_update(
-                phase="Queuing roster refresh…",
+                phase="Queuing roster refresh (requested)…",
                 detail=f"queuing {len(roster_uid_list)} player(s) before import"
             )
             try:
@@ -4896,7 +4732,7 @@ async def auto_import_run(ctx, *args):
             f"Last run: `{_get_setting('auto_import_last_run')}`\n"
             f"Imported this run: `{_get_setting('auto_import_last_imported_count')}`\n"
             f"Summary: `{_get_setting('auto_import_last_summary', '—')}`\n"
-            "Note: background auto-import is disabled. `!auto_import_run` now refreshes roster/player API data first by default. Use `no_refresh` only when you want to skip that step."
+            "Note: background auto-import is disabled. Use `!auto_import_run` after each session. Use `!auto_import_run refresh` only when you want to force API-side roster updates first."
         )
         await _stop_status_ticker(stop_event, ticker_task, status_msg, final_text=final)
 
