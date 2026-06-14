@@ -1,0 +1,25 @@
+name: Jarvis CI
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Compile bot
+        run: python -S -m py_compile main.py
+      - name: Offline smoke
+        run: python scripts/jarvis_offline_smoke.py --repo-root . --db marvel_rivals_stats.db
+      - name: Generate sample outputs
+        run: python scripts/generate_db_sample_outputs.py --db marvel_rivals_stats.db --out .tmp/sample_outputs.md
