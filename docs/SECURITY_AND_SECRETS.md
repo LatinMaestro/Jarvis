@@ -1,29 +1,24 @@
 # Security and Secrets
 
-## Secret handling
+## Never commit
 
-Never commit:
+- Discord bot tokens;
+- Marvel Rivals API keys;
+- Railway credentials;
+- real `.env` files;
+- production database exports;
+- generated test databases.
 
-- Discord bot token;
-- Marvel Rivals API key;
-- Railway project/service tokens;
-- `.env` or `.env.*` files containing real values;
-- live production DB backups copied from Railway unless the owner explicitly approves and sensitive data handling is agreed.
+The repository includes `.env.example` with blank secret values.
 
-## GitHub repository hygiene
+## Production boundaries
 
-The repository should include `env.example`, not `.env`.
+Codex must not directly access or modify the live Railway database and must not connect automated tests to live Discord.
 
-The current deployment pack includes `gitignore.txt`; when installing into a repo, convert/copy it as `.gitignore` if required.
+The GitHub database is a historical snapshot. Tests use temporary copies and must not present snapshot data as current production statistics.
 
-## Database data
-
-The SQLite DB contains player names, match history, Discord-related session state and API metadata. Treat it as private project data.
-
-Codex may inspect the bundled seed DB for testing, but must not upload it elsewhere or use it outside the repository workflow.
+An owner-approved copied Railway export is sensitive production data. Keep it outside Git, copy it again for testing, and remove it according to the owner's handling instructions.
 
 ## API safety
 
-Normal command tests must not call Marvel Rivals API unless explicitly required. Prefer stored match JSON and local DB fixtures.
-
-Hero-cache/API refreshes should remain opt-in by default.
+Normal regression tests make no live Marvel Rivals API calls. Prefer stored JSON fixtures and keep cache refresh behavior opt-in.

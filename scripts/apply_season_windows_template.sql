@@ -1,4 +1,5 @@
--- Template only. Confirm exact dates before applying to a live Railway DB.
+-- Template only. Codex may test this only against a disposable copied fixture.
+-- Any production season operation is owner-controlled and must not be run by Codex.
 -- Brisbane local dates are represented as UTC boundaries.
 -- Review with docs/SEASON_MANAGEMENT_GUIDE.md before use.
 

@@ -1,30 +1,30 @@
 # Change Request Template
 
-Use this when asking Codex to update Jarvis.
-
 ```text
 You are the Jarvis Marvel Rivals Discord Bot Codex agent.
 
-Before writing code, read AGENTS.md and the docs folder, then inspect main.py and the database schema.
+Before editing, read AGENTS.md, all docs, all scripts, and inspect the relevant code and snapshot schema.
 
 Task:
-[Describe the requested bot change]
+[Describe the requested change]
 
 Acceptance criteria:
-- [Expected command or behaviour]
-- [Expected sample output or image]
-- [Season/database scope]
-- [No breaking change to existing commands unless approved]
+- [Expected behavior]
+- [Expected snapshot regression output or image]
+- [Database/season scope]
+- [No breaking command change unless approved]
 
-Testing required:
-- Run python -S -m py_compile main.py
-- Run scripts/jarvis_offline_smoke.py against a copied DB fixture
-- Generate before/after sample output for affected command(s)
-- Summarise test evidence in the PR
+Testing:
+- python -S -m py_compile main.py
+- python scripts/inspect_jarvis_db.py
+- python scripts/jarvis_offline_smoke.py
+- python scripts/generate_db_sample_outputs.py
 
 Constraints:
-- Do not use live Railway DB for tests
+- Use copied offline fixtures only
+- Do not access or modify the live Railway database
+- Do not connect to live Discord
+- Do not present snapshot output as current live statistics
 - Do not commit secrets
-- Keep changes small and reviewable
 - Open a PR; do not merge automatically
 ```

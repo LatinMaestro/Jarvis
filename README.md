@@ -1,28 +1,30 @@
 # Jarvis Codex Agent Document Suite
 
-This pack was generated from the latest uploaded `Jarvis.zip` GitHub export. It is intended to be copied into, or used alongside, the Jarvis GitHub repository before linking the repository to a Codex agent.
+This repository includes the operating guidance and offline test harness for Codex-assisted development of the Jarvis Marvel Rivals Discord bot.
 
-## Latest export audit summary
+## Operating model
 
-- Repository package folder: `Jarvis/`
-- Main bot file: `main.py`
-- Main bot file size: 827,206 bytes / 23,771 lines
-- SQLite seed database: `marvel_rivals_stats.db` (21.4 MB)
-- Detected Discord commands: 57
-- Python compile: passed
-- SQLite integrity check: `ok`
-- Current bundled DB season: Season 7
-- Season windows in bundled DB: 4 rows, no internal overlaps detected
+- GitHub is the source of truth for code and review history.
+- Railway runs the live bot.
+- Railway's persistent volume database owns current live statistics.
+- The database committed to GitHub is a historical snapshot for offline regression checks only.
+- Codex does not access live Discord or directly access or modify the Railway production database.
 
-## How to use this pack
+## Normal development
 
-1. Read `docs/CODEX_AGENT_ROLE.md` and paste the role section into the Codex agent setup prompt.
-2. Copy `AGENTS.md` into the root of the Jarvis GitHub repository.
-3. Copy the `docs/`, `scripts/`, and `.github/workflows/` folders into the repository.
-4. Commit these documents on a documentation branch first.
-5. Link the GitHub repository to Codex.
-6. Ask Codex to inspect the repository and run `scripts/jarvis_offline_smoke.py` before making code changes.
+Use the GitHub snapshot database for compile checks, schema and query checks, offline smoke tests, and sample-output regression evidence. The scripts copy the snapshot into `.tmp` before opening it.
 
-## Core rule
+Run:
 
-Codex must never test against the live Railway SQLite volume. All tests must use a copied fixture database.
+```bash
+python -S -m py_compile main.py
+python scripts/inspect_jarvis_db.py
+python scripts/jarvis_offline_smoke.py
+python scripts/generate_db_sample_outputs.py
+```
+
+Generated outputs describe the bundled snapshot, not current live stats.
+
+## Current-stat validation
+
+When current production-state validation is genuinely required, use an owner-approved copied Railway database export or a staging Railway service. Never test against or modify the live production database.

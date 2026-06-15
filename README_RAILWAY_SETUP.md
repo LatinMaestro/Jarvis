@@ -1,30 +1,24 @@
-# Marvel Rivals Discord Bot — Railway Deployment Pack
+# Marvel Rivals Discord Bot - Railway Setup
 
-This folder is the clean Railway deployment pack prepared from the Replit export.
+## Ownership model
 
-## Included files
+- GitHub is the source of truth for deployed bot code.
+- Railway is the live runtime environment.
+- The Railway persistent volume database is the source of truth for current live statistics.
+- `marvel_rivals_stats.db` in GitHub is a historical snapshot, offline regression fixture, and first-deploy seed only.
 
-- `main.py` — current working bot code from the Replit export.
-- `marvel_rivals_stats.db` — checkpointed SQLite database seed.
-- `requirements.txt` — Python packages needed by the bot.
-- `runtime.txt` and `.python-version` — Python 3.11 selection.
-- `railway.toml` — Railway start command and restart policy.
-- `.env.example` — variables to add in Railway.
-- `.gitignore` — excludes Replit/system/runtime files.
+Codex must not directly access or modify the live Railway production database or connect automated tests to live Discord.
 
-## Not included
+## Deployment files
 
-The following Replit export items were deliberately excluded:
-
-- `.git/`, `.local/`, `.agents/`, cache folders, Replit logs.
-- `.replit`, because Railway does not use it.
-- `keep_alive.py`, `web_monitor.py`, templates/static web monitor files, because the Discord bot does not need a web keep-alive on Railway.
-- database sidecars (`.db-wal` and `.db-shm`), because the database has been checkpointed into a clean single `.db` file.
-- old/duplicate files such as `new_command.py`, `dump.sql`, and nested old zip files.
+- `main.py` - bot runtime code.
+- `marvel_rivals_stats.db` - historical snapshot and first-deploy seed.
+- `requirements.txt` - runtime packages.
+- `runtime.txt` and `.python-version` - Python selection.
+- `railway.toml` - start command and restart policy.
+- `.env.example` - variable names without secrets.
 
 ## Railway variables
-
-Set these in the Railway service Variables tab:
 
 ```env
 DISCORD_BOT_TOKEN=your_discord_bot_token
@@ -41,48 +35,24 @@ ENABLE_WEB_MONITOR=false
 ENABLE_KEEP_ALIVE=false
 ```
 
-## Railway volume
+Never commit real values.
 
-Attach a Railway volume to the bot service and mount it at:
+## Persistent volume
 
-```text
-/data
-```
+Mount one Railway volume at `/data` and keep the service at one running instance while SQLite is used.
 
-On first start, the bot will copy the bundled `marvel_rivals_stats.db` into `/data/marvel_rivals_stats.db` if the volume does not already contain the database. After that, Railway will persist the live SQLite database on the volume.
+On first start, the bot may seed an empty volume from the GitHub snapshot. After that, `/data/marvel_rivals_stats.db` is independent production data and must not be treated as a mirror of the GitHub file.
 
 ## Start command
-
-`railway.toml` sets:
 
 ```bash
 python main.py
 ```
 
-## First commands to test in Discord
+## Development validation
 
-After Railway shows the deployment as running, test:
+Repository CI and Codex use temporary copies of the GitHub snapshot. Snapshot regression output is not proof of current live statistics.
 
-```text
-!season
-!auto_import_status
-!roster_list
-!hero_roles_check
-!helpme
-```
+If current-stat validation is required, use an owner-approved copied Railway export or staging service. Never test against the live production database.
 
-Then test the import flow after a gaming session:
-
-```text
-!auto_import_run
-```
-
-The bot now automatically runs `!run_all_stats` after a successful `!auto_import_run`.
-
-## Important operating notes
-
-- Do not enable Railway serverless mode for this bot. Discord bots need a continuously running process.
-- Keep the service scaled to one instance while using SQLite. Multiple instances writing to the same SQLite file can corrupt data.
-- Leave background auto-import off. The intended workflow is to run `!auto_import_run` manually after a session.
-- Use `!auto_import_run refresh` only when you specifically want to queue API-side roster refreshes first.
-- If you suspect missed games during early testing, run `!auto_import_run days=7`. Use `reset_cursor` only for recovery/testing.
+Any post-deployment Discord checks are owner-operated.

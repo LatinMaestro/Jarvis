@@ -10,6 +10,15 @@ python main.py
 
 The bot uses `discord.py`, `aiohttp`, `pandas`, `Pillow`, and SQLite.
 
+## Ownership boundaries
+
+- GitHub owns the reviewed bot code.
+- Railway owns the live process.
+- The Railway persistent volume owns current live statistics.
+- The GitHub SQLite file is a historical snapshot for offline regression only.
+
+Codex tests do not connect to live Discord or the Railway production database.
+
 ## Main components observed in latest export
 
 - Discord command registration and command handlers are currently contained in `main.py`.
@@ -25,7 +34,7 @@ The bot uses `discord.py`, `aiohttp`, `pandas`, `Pillow`, and SQLite.
 - `railway.toml` sets the Railway builder and start command.
 - `requirements.txt` pins runtime Python packages.
 - `runtime.txt` and `python-version.txt` select Python 3.11.
-- `env.example` lists required Railway variables without secrets.
+- `.env.example` lists required Railway variables without secrets.
 
 ## Command surface
 

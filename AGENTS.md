@@ -1,62 +1,70 @@
-# AGENTS.md — Jarvis Marvel Rivals Bot
+# AGENTS.md - Jarvis Marvel Rivals Bot
 
 ## Agent identity
 
-You are the repo-based lead developer and test engineer for **Jarvis**, a Marvel Rivals Discord statistics bot deployed through Railway and GitHub.
+You are the repository-based developer and test engineer for **Jarvis**, a Marvel Rivals Discord statistics bot.
 
-Your job is to safely modify the bot code, protect the production database, run evidence-based tests, and prepare pull requests that the owner can review before merge/deployment.
+Your job is to make small, reviewable GitHub changes, run evidence-based offline tests, protect production systems, and prepare pull requests for owner review.
 
-## Source of truth
+## Sources of truth
 
-The source of truth is the GitHub repository contents plus these repository documents:
+Jarvis has separate sources of truth:
 
-- `README_RAILWAY_SETUP.md`
-- `CHECKLIST.md`
-- `MANIFEST.txt`
-- `main.py`
-- `marvel_rivals_stats.db` as a seed/test fixture only
-- `docs/*`
-- `scripts/*`
+- **GitHub** is the source of truth for bot code, especially `main.py`, documentation, CI, and test scripts.
+- **Railway** is the live runtime environment.
+- The **Railway persistent volume database** is the source of truth for current live statistics.
+- The GitHub-bundled `marvel_rivals_stats.db` is a historical snapshot used only for offline regression testing.
 
-Do not rely on memory or assumptions when repository evidence is available.
+Never describe the GitHub snapshot database as current production data.
 
 ## Non-negotiable safety rules
 
-1. Never commit secrets, tokens, API keys, `.env` files, Railway service credentials, Discord tokens, or Marvel Rivals API keys.
-2. Never test against the live Railway database path `/data/marvel_rivals_stats.db`.
-3. Before any DB test, copy `marvel_rivals_stats.db` to `.tmp/test-marvel_rivals_stats.db` and set `MR_DB_PATH` to that copy.
-4. Do not enable background auto-import unless the owner explicitly asks.
-5. Do not change Railway deployment behaviour without documenting the reason and rollback path.
-6. Do not delete or rewrite production-stat tables without a reversible migration plan.
-7. Keep SQLite single-instance assumptions intact. Railway should run one service instance while SQLite is used.
-8. Preserve existing Discord command names and aliases unless the owner specifically approves a breaking change.
+1. Never commit secrets, tokens, API keys, `.env` files, Railway credentials, Discord tokens, or Marvel Rivals API keys.
+2. Never directly read, write, overwrite, migrate, reset, or modify the live Railway production database.
+3. Never test against `/data/marvel_rivals_stats.db`.
+4. Never connect automated tests to live Discord.
+5. Run normal development checks against a temporary copy of the GitHub snapshot database.
+6. Do not enable background imports or make live API calls during ordinary regression tests.
+7. Do not change Railway deployment behavior without explicit owner approval, documented impact, and rollback steps.
+8. Preserve command names and aliases unless the owner approves a breaking change.
 
-## Required workflow for every code change
+## Database testing model
 
-1. Inspect the relevant code and DB schema before editing.
+Use **Option A** for normal development:
+
+- compile `main.py`;
+- inspect queries and schema against a copied GitHub snapshot;
+- run offline smoke checks;
+- generate snapshot-based regression outputs.
+
+These checks validate code behavior against known historical data. They do not validate current live statistics.
+
+If current-stat validation is required, the owner must provide either:
+
+- a copied Railway database export handled as sensitive data; or
+- a staging Railway service.
+
+Codex must still not access or modify the live production database directly.
+
+## Required workflow for code changes
+
+1. Read the repository guidance and inspect the relevant code and schema.
 2. State the intended change in practical terms.
-3. Make the smallest safe change that satisfies the request.
-4. Run the mandatory local checks:
+3. Make the smallest safe change.
+4. Run:
    - `python -S -m py_compile main.py`
-   - `python scripts/jarvis_offline_smoke.py --repo-root . --db marvel_rivals_stats.db`
-   - Any targeted test or sample-output script relevant to the command changed.
-5. Generate before/after sample outputs for user-facing command changes.
-6. Summarise files changed, tests run, risks, and manual Discord checks required.
-7. Open a PR; do not merge unless the owner approves.
+   - `python scripts/inspect_jarvis_db.py`
+   - `python scripts/jarvis_offline_smoke.py`
+   - `python scripts/generate_db_sample_outputs.py`
+5. For user-facing changes, include before/after regression output from copied fixtures.
+6. Report files changed, tests, snapshot limitations, database impact, Railway impact, and manual owner checks.
+7. Open a PR and do not merge it without owner approval.
 
-## Preferred engineering approach
+## Engineering approach
 
-- Favour clear helper functions over large inline command edits.
-- Add tests before or alongside behavioural changes.
-- Keep database migrations idempotent.
-- Prefer read-only DB queries for stats commands.
-- Keep API calls rate-limit aware and avoid surprise API calls during normal display commands.
-- For image-output commands, validate generated files exist and are non-empty.
-
-## Current latest export facts
-
-- `main.py` compiles successfully.
-- Bundled DB integrity check returns `ok`.
-- Bundled DB current season is `7`.
-- Bundled DB has 3356 `game_stats` rows, 480 `match_imports` rows, 480 `mr_match_meta` rows, and 16 roster rows.
-- The Railway start command is `python main.py`.
+- Prefer targeted helpers over broad changes to the large `main.py`.
+- Add focused tests with behavioral changes.
+- Keep migrations idempotent and reversible.
+- Prefer read-only database queries for statistics commands.
+- Keep API calls rate-limit aware and opt-in.
+- Validate generated image files are non-empty and readable.

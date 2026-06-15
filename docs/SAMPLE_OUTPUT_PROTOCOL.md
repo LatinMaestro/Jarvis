@@ -2,36 +2,45 @@
 
 ## Purpose
 
-Every user-facing command change should produce sample output before merge so the owner can check behaviour before Railway deployment.
+User-facing command changes should include before/after regression output so the owner can review formatting and behavior before deployment.
 
-## Standard command-output evidence
+## Data meaning
 
-Use the database sample script:
+Default generated outputs come from a temporary copy of the GitHub-bundled database snapshot. They are:
+
+- offline regression evidence;
+- useful for stable query and formatting comparisons;
+- not current live Discord output;
+- not proof of current Railway statistics.
+
+## Standard command
 
 ```bash
-mkdir -p .tmp
-cp marvel_rivals_stats.db .tmp/test-marvel_rivals_stats.db
-python scripts/generate_db_sample_outputs.py --db .tmp/test-marvel_rivals_stats.db --out .tmp/sample_outputs.md
+python scripts/generate_db_sample_outputs.py
 ```
 
-Attach or paste the relevant section in the PR.
+The script copies the snapshot to `.tmp` and writes `.tmp/sample_outputs.md`.
 
-## Requirements for output samples
+## Required evidence
 
-For every changed command, provide:
+For each changed command, provide:
 
 1. Command name and example invocation.
-2. Database/season used.
-3. Output text or image file generated.
-4. Any known difference from live Discord formatting.
-5. If image output is generated, confirm file path and file size.
+2. Snapshot or fixture used.
+3. Output text or image generated.
+4. Known differences from Discord rendering.
+5. For images, file path, size, and successful Pillow-open validation.
 
-## Baseline sample file
+## Baseline
 
-This pack includes `sample_outputs_from_uploaded_db.md`, generated from the latest uploaded DB. Codex should regenerate it after any DB or command-output change.
+`sample_outputs_from_uploaded_db.md` is the committed snapshot regression baseline. Regenerate it after relevant query, parser, schema-fixture, or output changes:
 
-## Discord-context testing
+```bash
+python scripts/generate_db_sample_outputs.py --out sample_outputs_from_uploaded_db.md
+```
 
-Commands that rely on `ctx.send` should be tested with a fake context that captures sent text, file attachments, embeds, and errors/exceptions.
+## Current-stat validation
 
-Do not connect to the live Discord bot for automated testing.
+If current statistics must be validated, use an owner-approved copied Railway export or staging service. Never run the generator against the live production database.
+
+Commands that rely on `ctx.send` should use a fake context. Automated tests must not connect to live Discord.

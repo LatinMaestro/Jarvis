@@ -1,30 +1,26 @@
 # PR Review Checklist
 
-## Owner review
-
-Before merging a Jarvis PR, confirm:
+## Required review
 
 - [ ] The PR summary clearly explains the change.
-- [ ] No secrets or `.env` files are included.
-- [ ] `main.py` compiles.
-- [ ] Offline smoke tests passed against a copied DB fixture.
-- [ ] Sample output was generated for every changed command.
-- [ ] Database migrations are safe and idempotent.
-- [ ] Railway deployment settings are unchanged or clearly explained.
-- [ ] Rollback path is clear.
-- [ ] Manual Discord commands to test are listed.
+- [ ] No secrets, `.env` files, production exports, or generated test databases are included.
+- [ ] Railway settings and live Discord were not touched unless separately approved.
+- [ ] The live Railway production database was not accessed or modified.
+- [ ] Snapshot outputs are labeled as offline regression evidence, not current live statistics.
+- [ ] Database migrations, if any, were tested only against disposable copied fixtures.
+- [ ] Rollback and owner-operated post-deployment checks are documented where relevant.
 
-## Manual Discord smoke after deployment
+## PRs modifying `main.py`
 
-Run:
+- [ ] `python -S -m py_compile main.py` passed.
+- [ ] `python scripts/inspect_jarvis_db.py` passed.
+- [ ] `python scripts/jarvis_offline_smoke.py` passed.
+- [ ] `python scripts/generate_db_sample_outputs.py` passed.
+- [ ] Relevant before/after snapshot regression output is included.
+- [ ] Image changes include non-empty, readable image evidence.
 
-```text
-!season
-!season_windows
-!auto_import_status
-!roster_list
-!hero_roles_check
-!helpme
-```
+Current live Railway DB access is not required for a normal code PR.
 
-For stat/image changes, run the changed command with the exact sample arguments used in PR testing.
+## After deployment
+
+Any live Discord smoke testing is performed by the owner or an explicitly authorized operator, not by automated Codex tests.

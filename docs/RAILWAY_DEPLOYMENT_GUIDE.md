@@ -1,8 +1,13 @@
 # Railway Deployment Guide
 
-## Current Railway deployment model
+## Ownership model
 
-The latest export uses Railway with:
+- GitHub is the source of truth for deployed code.
+- Railway is the live runtime environment.
+- The Railway persistent volume database is the source of truth for current live statistics.
+- The GitHub database is only a historical snapshot and first-deploy seed.
+
+## Current deployment configuration
 
 ```toml
 [build]
@@ -14,63 +19,27 @@ restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
 ```
 
-## Required Railway variables
-
-Use the variables listed in `env.example` and `README_RAILWAY_SETUP.md`.
-
-Required secrets:
-
-```env
-DISCORD_BOT_TOKEN=...
-MR_API_KEY=...
-```
-
-Persistent SQLite volume:
+The volume is mounted at `/data`, and the live database path is:
 
 ```env
 MR_DB_PATH=/data/marvel_rivals_stats.db
 MR_DB_SEED_PATH=marvel_rivals_stats.db
 ```
 
-Recommended safe defaults:
+Keep one Railway service instance while SQLite is used.
 
-```env
-AUTO_IMPORT_REFRESH_ROSTER_DEFAULT=false
-HERO_NAME_API_FALLBACK_ENABLED=false
-ENABLE_COMMAND_HERO_CACHE_REFRESH=false
-ENABLE_WEB_MONITOR=false
-ENABLE_KEEP_ALIVE=false
-```
+## Codex boundary
 
-## Volume rule
+Codex must not directly read, write, overwrite, migrate, reset, download, or modify the live production database. Codex must not connect to live Discord.
 
-Attach one Railway volume to the bot service and mount it at `/data`. Keep the service scaled to one running instance while SQLite is used.
+Normal development uses copied GitHub snapshot fixtures. If current-stat validation is required, the owner may provide a copied Railway export or authorize a staging Railway service. Neither path permits tests against the live production database.
 
-## Deployment review steps
+## Deployment review
 
-Before merging a PR that will deploy to Railway:
+Before merging a deployable code PR:
 
-1. Check `python -S -m py_compile main.py` passed.
-2. Check offline DB smoke tests passed.
-3. Check no secret files were added.
-4. Check Railway variables did not need changes, or document exact changes.
-5. Check rollback is simple: revert merge commit and redeploy previous commit.
-
-## Post-deployment smoke commands
-
-Run in Discord after deployment:
-
-```text
-!season
-!season_windows
-!auto_import_status
-!roster_list
-!hero_roles_check
-!helpme
-```
-
-For import-related changes, test after a gaming session with:
-
-```text
-!auto_import_run
-```
+1. Confirm compile and offline snapshot checks passed.
+2. Confirm no secrets or production data were committed.
+3. Confirm Railway configuration changes are absent or explicitly documented.
+4. Confirm any database change was tested against disposable copies.
+5. Document rollback steps and owner-operated post-deployment checks.

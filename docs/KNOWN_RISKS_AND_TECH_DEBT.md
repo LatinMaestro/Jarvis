@@ -2,28 +2,30 @@
 
 ## Large monolithic `main.py`
 
-`main.py` is currently 23,771 lines. This increases regression risk. Codex should avoid broad refactors unless specifically requested.
+`main.py` is approximately 23,771 lines. Broad changes have a high regression risk. Prefer focused helpers and targeted evidence.
 
 ## SQLite production database
 
-SQLite is acceptable for a small Discord bot, but Railway must run a single instance with a persistent volume. Multiple writers can corrupt data.
+Railway must run one service instance while SQLite is used. The persistent volume database is the source of truth for current live statistics.
 
-## Seed DB vs live DB drift
+## Snapshot drift
 
-The repo seed DB may not always match the live Railway volume. Before season routing, import logic, or data cleanup changes, Codex should confirm which database is being used for the task.
+The GitHub database is expected to drift from Railway production. It is historical regression data, not a production mirror. Codex must not query the live volume to resolve that drift.
 
-## Season 8 / 8.5 not in bundled seed DB
+Current-stat validation requires an owner-approved copied Railway export or staging service.
 
-The latest bundled seed DB has season windows through Season 7 only. If Season 8/8.5 is already configured live, the seed DB is behind. If not configured live, it needs an approved setup action.
+## Snapshot season coverage
 
-## API rate limits
+The bundled snapshot has season windows through Season 7 only. This does not establish the current live season and must not drive production season operations.
 
-Import and refresh commands use the Marvel Rivals API and may hit rate limits. Normal display/stat tests should avoid live API calls.
+## API and Discord access
+
+Import and refresh commands can hit rate limits and mutate state. Normal tests should use stored fixtures, make no live API calls, and never connect to live Discord.
 
 ## Image rendering
 
-Image commands depend on fonts and Pillow. Keep robust font fallbacks and test generated files.
+Image commands depend on Pillow and available fonts. Validate generated files and visual legibility.
 
-## Disabled roster players
+## Roster filtering
 
-The roster table includes disabled players. Codex must respect `enabled` filtering when a command is intended to use the active roster only.
+The snapshot includes disabled players. Tests must verify active-only commands honor the `enabled` flag.
