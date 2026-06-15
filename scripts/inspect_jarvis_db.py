@@ -44,7 +44,10 @@ def main():
     ).fetchall()
     for name, typ in objects:
         if typ == "table" and name != "sqlite_sequence":
-            print(f"{name}: {cur.execute(f'select count(*) from \"{name}\"').fetchone()[0]}")
+            quoted_name = name.replace('"', '""')
+            sql = f'SELECT COUNT(*) FROM "{quoted_name}"'
+            count = cur.execute(sql).fetchone()[0]
+            print(f"{name}: {count}")
         elif typ == "view":
             print(f"{name}: view")
     print("bot_settings:")
