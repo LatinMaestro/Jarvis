@@ -1,38 +1,40 @@
-# GitHub + Codex Setup Steps
+# GitHub and Codex Setup Steps
 
-## Step 1 — Prepare repository docs
+## Repository setup
 
-1. Create a branch such as `docs/codex-agent-setup`.
-2. Copy `AGENTS.md`, the `docs/` folder, the `scripts/` folder, and `.github/workflows/jarvis-ci.yml` into the Jarvis repo.
-3. Commit and push the documentation branch.
-4. Open a PR and merge once reviewed.
+1. Keep `AGENTS.md`, `docs/`, `scripts/`, and the snapshot baseline in GitHub.
+2. Keep CI at `.github/workflows/jarvis-ci.yml`.
+3. Use branches and pull requests for reviewable changes.
 
-## Step 2 — Link GitHub repository to Codex
+## Ownership model
 
-In ChatGPT/Codex, connect the Jarvis GitHub repository and allow Codex to inspect repository files. Use the role text from `docs/CODEX_AGENT_ROLE.md`.
+- GitHub is the source of truth for code.
+- Railway is the live runtime.
+- The Railway volume database is the source of truth for current live statistics.
+- The GitHub database is a historical offline regression snapshot.
 
-## Step 3 — First Codex task
+## First Codex task
 
-Use this first prompt:
+Ask Codex to read all repository guidance and inspect the offline harness before editing.
 
-```text
-Inspect the Jarvis repository and read AGENTS.md and docs/*. Do not write code. Confirm the repository structure, current Railway deployment model, current DB status, command list, and first safe test commands.
+## First safe checks
+
+```bash
+python -S -m py_compile main.py
+python scripts/inspect_jarvis_db.py
+python scripts/jarvis_offline_smoke.py
+python scripts/generate_db_sample_outputs.py
 ```
 
-## Step 4 — First safe test task
+These commands use copied snapshot fixtures. They do not require Railway, production secrets, or live Discord.
 
-```text
-Run the offline smoke checks against a copied DB fixture. Do not use the live Railway DB. Report the exact commands run and results.
-```
-
-## Step 5 — Normal development
-
-For each bot update:
+## Normal development
 
 1. Create a branch.
-2. Make the smallest safe code change.
-3. Run smoke checks and command-specific sample outputs.
+2. Make the smallest safe change.
+3. Run offline checks and command-specific regression outputs.
 4. Open a PR with evidence.
-5. Owner reviews sample outputs.
-6. Merge to trigger Railway deploy.
-7. Owner runs manual Discord smoke commands.
+5. The owner reviews and merges.
+6. The owner or an authorized operator performs any live post-deployment checks.
+
+Codex must not directly access or modify the live Railway database or connect automated tests to live Discord.

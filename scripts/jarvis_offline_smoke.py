@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Offline smoke checks for the Jarvis repository. Does not connect to Discord or the Marvel Rivals API."""
+"""Offline smoke checks for Jarvis. Never connects to Railway, Discord, or the API."""
 import argparse
 import pathlib
 import py_compile
-import sqlite3
 from datetime import datetime
 
-REQUIRED_FILES = ["main.py", "requirements.txt", "railway.toml", "env.example", "marvel_rivals_stats.db"]
+from offline_test_utils import connect_read_only, prepare_db_fixture
+
+REQUIRED_FILES = ["main.py", "requirements.txt", "railway.toml", ".env.example", "marvel_rivals_stats.db"]
 REQUIRED_TABLES = ["bot_settings", "game_stats", "streaks", "mr_roster", "mr_season_windows", "mr_match_meta", "match_imports", "hero_cache"]
 
 def fail(msg):
@@ -18,10 +19,7 @@ def main():
     ap.add_argument("--repo-root", default=".")
     ap.add_argument("--db", default="marvel_rivals_stats.db")
     args = ap.parse_args()
-    root = pathlib.Path(args.repo_root)
-    db = pathlib.Path(args.db)
-    if not db.is_absolute():
-        db = root / db
+    root = pathlib.Path(args.repo_root).resolve()
     for rel in REQUIRED_FILES:
         if not (root / rel).exists():
             return fail(f"missing required file: {rel}")
@@ -30,12 +28,26 @@ def main():
         print("PASS: main.py compiles")
     except Exception as exc:
         return fail(f"main.py compile failed: {exc}")
-    con = sqlite3.connect(db)
+    try:
+        source, db = prepare_db_fixture(root, args.db, "smoke")
+    except Exception as exc:
+        return fail(str(exc))
+    print(f"PASS: copied offline DB fixture from {source.name} to {db.relative_to(root)}")
+
+    con = connect_read_only(db)
     cur = con.cursor()
     integrity = cur.execute("PRAGMA integrity_check").fetchone()[0]
     if integrity != "ok":
         return fail(f"SQLite integrity check returned {integrity}")
     print("PASS: SQLite integrity_check ok")
+    quick = cur.execute("PRAGMA quick_check").fetchone()[0]
+    if quick != "ok":
+        return fail(f"SQLite quick_check returned {quick}")
+    print("PASS: SQLite quick_check ok")
+    foreign_key_violations = cur.execute("PRAGMA foreign_key_check").fetchall()
+    if foreign_key_violations:
+        return fail(f"SQLite foreign_key_check returned {len(foreign_key_violations)} rows")
+    print("PASS: SQLite foreign_key_check clean")
     existing = {r[0] for r in cur.execute("select name from sqlite_master where type='table'")}
     missing = [t for t in REQUIRED_TABLES if t not in existing]
     if missing:

@@ -1,26 +1,25 @@
-# Installation Guide for This Document Suite
+# Installation Guide for the Codex Control Files
 
-This document suite is not a replacement for the Jarvis bot. It is a setup/control layer for Codex-assisted development.
+These files define the safe operating model for Codex-assisted Jarvis development. They do not replace the bot or Railway.
 
-## Copy into repository
+## Repository paths
 
-Copy these paths into the root of the Jarvis GitHub repository:
+Keep these paths in the Jarvis GitHub repository:
 
 ```text
 AGENTS.md
 docs/
 scripts/
 .github/workflows/jarvis-ci.yml
+sample_outputs_from_uploaded_db.md
 ```
 
-Keep `sample_outputs_from_uploaded_db.md` as evidence or place it under `docs/evidence/` if preferred.
+The workflow must be under `.github/workflows/`; a root-level `jarvis-ci.yml` is not discovered by GitHub Actions.
 
-## Recommended first commit message
+## Database meaning
 
-```text
-docs: add Codex agent operating guide and offline test protocol
-```
+`marvel_rivals_stats.db` in GitHub is a historical offline regression fixture. The Railway persistent volume database remains the source of truth for current live statistics.
 
 ## Do not copy
 
-Do not copy any local `.tmp` folders, generated test databases, or real `.env` files.
+Do not commit `.tmp/`, generated test databases, Railway exports, real `.env` files, or production credentials.

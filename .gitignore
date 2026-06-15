@@ -20,6 +20,7 @@ replit.nix
 .cache/
 .agents/
 attached_assets/
+.tmp/
 
 # SQLite runtime sidecars / local backups
 *.db-shm

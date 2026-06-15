@@ -1,38 +1,31 @@
 # Codex Task Prompts
 
-## 1. First repository audit
+## Repository audit
 
 ```text
-Inspect the Jarvis repository without making changes. Read AGENTS.md, README_RAILWAY_SETUP.md, MANIFEST.txt, CHECKLIST.md, requirements.txt, railway.toml, env.example, main.py, and all docs. Then provide:
-1. repository structure summary;
-2. detected command list;
-3. database schema summary;
-4. Railway deployment summary;
-5. recommended first tests;
-6. risks or decisions needing owner approval.
-Do not write code yet.
+Inspect Jarvis without making changes. Read all guidance and scripts. Report code structure, offline snapshot schema, Railway deployment model, test readiness, and risks. Clearly distinguish snapshot facts from current live statistics.
 ```
 
-## 2. Implement a command update
+## Command update
 
 ```text
-Implement the requested update to [command name]. Use the current SQLite seed DB as a fixture only. Preserve existing command aliases. Add or update tests/scripts if useful. Generate sample output before and after the change. Run the mandatory smoke checks. Open a PR with evidence.
+Implement the requested command update using copied GitHub snapshot fixtures for offline regression only. Preserve aliases, run all mandatory checks, generate clearly labeled before/after evidence, and open a PR. Do not access Railway or live Discord.
 ```
 
-## 3. Add a new stat image
+## Image update
 
 ```text
-Add a new Jarvis stat image for [description]. Reuse existing visual style where practical. Query current-season data unless otherwise specified. Generate an offline sample image from the copied DB fixture and confirm it opens successfully. Do not change unrelated commands.
+Implement the requested image output. Use a copied snapshot fixture, confirm the image is non-empty and opens with Pillow, and include regression evidence. Do not claim it represents current live statistics.
 ```
 
-## 4. Season setup/update
+## Season review
 
 ```text
-Review current season settings and mr_season_windows. Confirm whether the repo seed DB and live Railway DB differ. Prepare a safe season-window update plan with SQL and Discord command alternatives. Do not apply destructive changes without approval.
+Review snapshot season data only as historical regression information. Do not infer current production state. Current-stat validation requires an owner-approved copied Railway export or staging service. Do not access or modify the live Railway database.
 ```
 
-## 5. Railway deployment review
+## Railway safety review
 
 ```text
-Review this PR for Railway safety. Check start command, requirements, env var changes, SQLite volume assumptions, background task behaviour, and rollback path. Provide a concise deployment approval checklist.
+Review the PR for start-command, environment-variable, SQLite single-instance, secret-handling, and rollback risks. Do not access Railway or production data.
 ```
