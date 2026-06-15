@@ -21,6 +21,15 @@ python scripts/generate_db_sample_outputs.py
 
 The script copies the snapshot to `.tmp` and writes `.tmp/sample_outputs.md`.
 
+For image-layout work, also run:
+
+```bash
+python scripts/generate_image_readability_samples.py
+```
+
+This writes representative PNGs under `.tmp/` and verifies them with Pillow.
+They are readability regressions, not current-stat reports.
+
 ## Required evidence
 
 For each changed command, provide:

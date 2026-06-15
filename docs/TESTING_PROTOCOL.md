@@ -15,6 +15,7 @@ python -S -m py_compile main.py
 python scripts/inspect_jarvis_db.py
 python scripts/jarvis_offline_smoke.py
 python scripts/generate_db_sample_outputs.py
+python scripts/generate_image_readability_samples.py
 ```
 
 The database scripts copy their input into `.tmp` and open the copy read-only.
@@ -66,6 +67,9 @@ Never use the live production database. Treat exports as sensitive, keep them ou
 - successful Pillow-open validation;
 - readable columns and labels;
 - sample image evidence.
+
+The image readability generator uses representative data with the real image
+renderers, writes only under `.tmp/`, and opens every generated PNG with Pillow.
 
 ## PR evidence
 
