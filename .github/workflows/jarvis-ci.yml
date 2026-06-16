@@ -28,6 +28,8 @@ jobs:
           python -m pip check
       - name: Compile bot
         run: python -S -m py_compile main.py
+      - name: Run offline unit tests
+        run: python -m unittest discover -s tests
       - name: Inspect snapshot fixture
         run: python scripts/inspect_jarvis_db.py
       - name: Run offline smoke checks
