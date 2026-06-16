@@ -4,6 +4,8 @@
 
 Phase 1 adds a Discord-native `@Jarvis` assistant to the existing bot. The assistant is mention-based, uses Gemini free tier only, and keeps all existing `!` commands intact.
 
+Phase 1B makes stat answers data-first: Jarvis detects factual stat intent, runs approved read-only helpers, builds the factual answer, and then uses Gemini only for style and light banter.
+
 Website and web app work is paused for this phase.
 
 ## User interface
@@ -39,13 +41,13 @@ AI_ASSISTANT_FREE_ONLY=true
 
 There is no OpenAI, Groq, Anthropic, paid Gemini fallback, or automatic paid fallback path.
 
-If Gemini is disabled, missing a key, rate-limited, or quota-limited, Jarvis replies gracefully instead of switching providers.
+If Gemini is disabled, missing a key, rate-limited, or quota-limited, Jarvis replies gracefully instead of switching providers. When approved stat helpers already produced a factual answer, Jarvis returns that deterministic stat-backed answer instead of a generic AI-unavailable message.
 
 ## Data model
 
 The assistant does not give Gemini unrestricted SQL access.
 
-Flow:
+Phase 1A flow:
 
 ```text
 Discord question
@@ -53,6 +55,18 @@ Bot strips @Jarvis mention
 Bot chooses approved read-only helpers
 Bot sends bounded stat summaries to Gemini
 Gemini writes the final Discord response
+```
+
+Phase 1B data-first flow:
+
+```text
+Discord question
+Bot strips @Jarvis mention
+Bot detects stat intent
+Bot runs approved read-only helpers
+Bot builds a deterministic factual answer
+Gemini receives the factual answer plus bounded context for wording only
+Final response preserves the factual answer
 ```
 
 The assistant cannot:
@@ -65,6 +79,8 @@ The assistant cannot:
 - execute arbitrary SQL;
 - dump raw match JSON;
 - access secrets.
+
+Gemini must not invent exact stats or tell the user to "ask the bot"; Jarvis is the bot. The model can add concise personality only after the stat answer is already present.
 
 ## Approved Phase 1 tools
 
@@ -79,7 +95,16 @@ The assistant package exposes predefined read-only helpers for:
 - recent games;
 - latest session summary;
 - player roast context;
-- lobby roast context.
+- lobby roast context;
+- leaderboard summaries;
+- first-place lookup using the main leaderboard threshold;
+- top players by whitelisted metric;
+- highest win rate;
+- top or worst duo chemistry;
+- best players by role;
+- best players by hero;
+- player podium context;
+- player recommendation context.
 
 These helpers are parameterized and bounded. They use the configured bot database at runtime and copied snapshot fixtures during tests.
 
@@ -104,7 +129,7 @@ When enabled, Phase 1 creates and writes to:
 ai_query_log
 ```
 
-The log stores metadata, question text, tool names, response preview, and error class. It must not store secrets.
+The log stores metadata, question text, tool names, response preview, error class, detected intent, whether Gemini was called, and whether a deterministic fallback was used. It must not store secrets.
 
 ## Testing
 
@@ -119,4 +144,3 @@ python -m unittest discover -s tests
 ```
 
 Tests mock Gemini and do not connect to live Discord, Railway, production data, or the live database.
-

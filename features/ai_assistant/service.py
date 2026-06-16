@@ -112,7 +112,7 @@ class JarvisAIAssistant:
         if cooldown_reply:
             return AssistantOutcome(True, reply=cooldown_reply, reason="cooldown")
 
-        if not self.config.gemini_ready():
+        if not self.config.enabled:
             self._safe_log(
                 guild_id,
                 channel_id,
@@ -122,20 +122,86 @@ class JarvisAIAssistant:
                 [],
                 None,
                 "not_configured",
+                "not_configured",
+                False,
+                False,
             )
             return AssistantOutcome(True, reply=DEFAULT_NOT_CONFIGURED_MESSAGE, reason="not_configured")
 
-        if not self._limits.check_and_increment(self.config):
-            return AssistantOutcome(True, reply=DEFAULT_NOT_CONFIGURED_MESSAGE, reason="soft_limit")
-
         context = build_stat_context(self.conn, clean_question, self.config.max_context_rows)
         if context.clarification:
+            self._safe_log(
+                guild_id,
+                channel_id,
+                user_id,
+                user_display_name,
+                clean_question,
+                context.tools_used,
+                context.clarification,
+                None,
+                context.intent_name,
+                False,
+                True,
+            )
             return AssistantOutcome(True, reply=context.clarification, tools_used=context.tools_used, reason="clarification")
 
-        prompt = build_prompt(clean_question, context.text)
+        factual_reply = context.factual_answer.text if context.factual_answer and context.factual_answer.data_found else None
+
+        if not self.config.gemini_ready():
+            if factual_reply:
+                reply = clamp_response(factual_reply, self.config.max_response_chars)
+                self._safe_log(
+                    guild_id,
+                    channel_id,
+                    user_id,
+                    user_display_name,
+                    clean_question,
+                    context.tools_used,
+                    reply,
+                    "gemini_unavailable",
+                    context.intent_name,
+                    False,
+                    True,
+                )
+                return AssistantOutcome(True, reply=reply, tools_used=context.tools_used, reason="deterministic_fallback")
+            self._safe_log(
+                guild_id,
+                channel_id,
+                user_id,
+                user_display_name,
+                clean_question,
+                context.tools_used,
+                None,
+                "not_configured",
+                context.intent_name,
+                False,
+                False,
+            )
+            return AssistantOutcome(True, reply=DEFAULT_NOT_CONFIGURED_MESSAGE, tools_used=context.tools_used, reason="not_configured")
+
+        if not self._limits.check_and_increment(self.config):
+            if factual_reply:
+                reply = clamp_response(factual_reply, self.config.max_response_chars)
+                self._safe_log(
+                    guild_id,
+                    channel_id,
+                    user_id,
+                    user_display_name,
+                    clean_question,
+                    context.tools_used,
+                    reply,
+                    "soft_limit",
+                    context.intent_name,
+                    False,
+                    True,
+                )
+                return AssistantOutcome(True, reply=reply, tools_used=context.tools_used, reason="deterministic_fallback")
+            return AssistantOutcome(True, reply=DEFAULT_NOT_CONFIGURED_MESSAGE, reason="soft_limit")
+
+        prompt = build_prompt(clean_question, context.text, factual_reply)
         try:
             raw_reply = await self.generator.generate(prompt)
-            reply = clamp_response(raw_reply, self.config.max_response_chars)
+            reply = self._merge_factual_and_gemini(factual_reply, raw_reply)
             self._safe_log(
                 guild_id,
                 channel_id,
@@ -145,9 +211,28 @@ class JarvisAIAssistant:
                 context.tools_used,
                 reply,
                 None,
+                context.intent_name,
+                True,
+                False,
             )
             return AssistantOutcome(True, reply=reply, tools_used=context.tools_used, reason="ok")
         except (GeminiRateLimitError, GeminiError) as exc:
+            if factual_reply:
+                reply = clamp_response(factual_reply, self.config.max_response_chars)
+                self._safe_log(
+                    guild_id,
+                    channel_id,
+                    user_id,
+                    user_display_name,
+                    clean_question,
+                    context.tools_used,
+                    reply,
+                    type(exc).__name__,
+                    context.intent_name,
+                    True,
+                    True,
+                )
+                return AssistantOutcome(True, reply=reply, tools_used=context.tools_used, reason="deterministic_fallback")
             self._safe_log(
                 guild_id,
                 channel_id,
@@ -157,8 +242,21 @@ class JarvisAIAssistant:
                 context.tools_used,
                 None,
                 type(exc).__name__,
+                context.intent_name,
+                True,
+                False,
             )
             return AssistantOutcome(True, reply=DEFAULT_NOT_CONFIGURED_MESSAGE, tools_used=context.tools_used, reason="ai_error")
+
+    def _merge_factual_and_gemini(self, factual_reply: str | None, raw_reply: str) -> str:
+        if not factual_reply:
+            return clamp_response(raw_reply, self.config.max_response_chars)
+        clean = (raw_reply or "").strip()
+        first_fact = factual_reply.splitlines()[0].strip()
+        if first_fact and first_fact.lower() in clean.lower():
+            return clamp_response(clean, self.config.max_response_chars)
+        merged = f"{factual_reply.strip()}\n\n{clean}" if clean else factual_reply.strip()
+        return clamp_response(merged, self.config.max_response_chars)
 
     def _check_cooldown(self, user_id: int | str | None) -> str | None:
         if self.config.cooldown_seconds <= 0 or user_id is None:
@@ -183,6 +281,9 @@ class JarvisAIAssistant:
         tools_used: list[str],
         response_preview: str | None,
         error: str | None,
+        detected_intent: str | None = None,
+        gemini_called: bool = False,
+        deterministic_fallback: bool = False,
     ) -> None:
         if not self.config.logging_enabled:
             return
@@ -198,6 +299,14 @@ class JarvisAIAssistant:
                     tools_used=tools_used,
                     response_preview=response_preview,
                     error=error,
+                    detected_intent=detected_intent,
+                    gemini_called=gemini_called,
+                    deterministic_fallback=deterministic_fallback,
+                    diagnostics={
+                        "tools_selected": tools_used,
+                        "gemini_called": gemini_called,
+                        "deterministic_fallback": deterministic_fallback,
+                    },
                 ),
             )
         except Exception:
