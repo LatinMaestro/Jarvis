@@ -36,16 +36,13 @@ from itertools import combinations
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
-from features.ai_assistant import JarvisAIAssistant
-from features.ai_assistant.discord_listener import is_command_message, strip_bot_mention
-from features.ai_assistant.response_formatting import DEFAULT_NOT_CONFIGURED_MESSAGE, chunk_discord_message
 
 # =========================
 # Global visual settings
 # =========================
 DEFAULT_FONT_PATH = "cour.ttf"
-BODY_PT = 26
-TITLE_PT = 42
+BODY_PT = 24
+TITLE_PT = 36
 
 # =========================
 # Team Fairness Session State (keep for !session_* / !next_teams)
@@ -144,7 +141,6 @@ try:
 except Exception:
     pass
 c = conn.cursor()
-ai_assistant = JarvisAIAssistant(conn)
 
 
 # =========================
@@ -5804,7 +5800,7 @@ def _get_top_dominant_hero_player_rows_api(
 
 def _render_player_heros_card(player_name: str, season_id: int,
                               rows: list[dict]) -> io.BytesIO:
-    W, H = 1650, 1080
+    W, H = 1500, 980
     pad = 26
 
     bg = (20, 20, 26)
@@ -5838,11 +5834,11 @@ def _render_player_heros_card(player_name: str, season_id: int,
     draw.text((left_x + 980, y), "Win%", font=body_font, fill=muted)
     draw.text((left_x + 1120, y), "Matches", font=body_font, fill=muted)
 
-    y += 34
+    y += 28
     draw.line([(pad * 2, y), (W - pad * 2, y)], fill=line, width=2)
     y += 14
 
-    max_rows = 16
+    max_rows = 18
     for r in rows[:max_rows]:
         hero_nm = str(r.get("hero_name", r["hero_id"]))[:28]
         time_txt = _fmt_time(int(r["seconds"]))
@@ -5859,7 +5855,7 @@ def _render_player_heros_card(player_name: str, season_id: int,
         draw.text((left_x + 680, y), kda_txt, font=body_font, fill=text)
         draw.text((left_x + 980, y), win_txt, font=body_font, fill=text)
         draw.text((left_x + 1120, y), matches_txt, font=body_font, fill=text)
-        y += 44
+        y += 32
 
     y_footer = H - pad - 58
     draw.text(
@@ -5876,7 +5872,7 @@ def _render_player_heros_card(player_name: str, season_id: int,
 
 def _render_dominant_hero_player_card(season_id: int,
                                       rows: list[dict]) -> io.BytesIO:
-    W, H = 1650, 1080
+    W, H = 1500, 980
     pad = 26
 
     bg = (20, 20, 26)
@@ -5912,11 +5908,11 @@ def _render_dominant_hero_player_card(season_id: int,
     draw.text((left_x + 1220, y), "Win%", font=body_font, fill=muted)
     draw.text((left_x + 1340, y), "Games", font=body_font, fill=muted)
 
-    y += 34
+    y += 28
     draw.line([(pad * 2, y), (W - pad * 2, y)], fill=line, width=2)
     y += 14
 
-    max_rows = 16
+    max_rows = 18
     for r in rows[:max_rows]:
         hero_nm = str(r.get("hero_name", r["hero_id"]))[:18]
         player_nm = str(r.get("player_name", r["player_uid"]))[:22]
@@ -5931,7 +5927,7 @@ def _render_dominant_hero_player_card(season_id: int,
         draw.text((left_x + 930, y), kda_txt, font=body_font, fill=text)
         draw.text((left_x + 1220, y), win_txt, font=body_font, fill=text)
         draw.text((left_x + 1340, y), games_txt, font=body_font, fill=text)
-        y += 44
+        y += 32
 
     y_footer = H - pad - 58
     draw.text(
@@ -6383,7 +6379,7 @@ async def player_bans(ctx):
     # ---------------------------------------------------------------------
     # Render (styled like player_heros)
     # ---------------------------------------------------------------------
-    W, H = 1650, 1250
+    W, H = 1500, 980
     pad = 26
 
     bg = (20, 20, 26)
@@ -6424,7 +6420,7 @@ async def player_bans(ctx):
     draw.text((x_b2, y), "Enemy Ban #2", font=body_font, fill=muted)
     draw.text((x_b3, y), "Enemy Ban #3", font=body_font, fill=muted)
 
-    y += 34
+    y += 28
     draw.line([(pad * 2, y), (W - pad * 2, y)], fill=line, width=2)
     y += 14
 
@@ -6436,7 +6432,7 @@ async def player_bans(ctx):
         draw.text((x_b1, y), _clip(r["b1"], 28), font=body_font, fill=text)
         draw.text((x_b2, y), _clip(r["b2"], 28), font=body_font, fill=text)
         draw.text((x_b3, y), _clip(r["b3"], 28), font=body_font, fill=text)
-        y += 42
+        y += 32
 
     # Divider before summary
     y += 6
@@ -6450,7 +6446,7 @@ async def player_bans(ctx):
         font=body_font,
         fill=muted,
     )
-    y += 42
+    y += 34
 
     # Summary headers
     x_rank = left_x
@@ -6465,7 +6461,7 @@ async def player_bans(ctx):
     draw.text((x_cnt, y), "Count", font=body_font, fill=muted)
     draw.text((x_rate, y), "Rate", font=body_font, fill=muted)
 
-    y += 34
+    y += 28
     draw.line([(pad * 2, y), (W - pad * 2, y)], fill=line, width=2)
     y += 14
 
@@ -6475,7 +6471,7 @@ async def player_bans(ctx):
         draw.text((x_hero, y), _clip(hero_label(hid), 22), font=body_font, fill=text)
         draw.text((x_cnt, y), str(cnt), font=body_font, fill=text)
         draw.text((x_rate, y), f"{rate*100:.0f}%", font=body_font, fill=text)
-        y += 42
+        y += 32
 
     # Footer note
     footer = "Games count only matches with recorded bans + known team side. Bans shown are the opposing team’s bans."
@@ -6821,11 +6817,11 @@ def _top3_more_render_image(season_id: int, top3_names: list[str], payload: dict
 
     scope_label = str(summary.get("scope_label", "all games"))
 
-    W = 2800
+    W = 2500
     pad = 26
-    row_h = 42
+    row_h = 32
     table_rows = max(1, len(rows))
-    extra_h = 410
+    extra_h = 330
     H = max(1100, 255 + (table_rows * row_h) + extra_h)
 
     bg = (20, 20, 26)
@@ -7147,7 +7143,7 @@ HERO_TIER_DEFAULT_TOP_N = 25
 HERO_SYNERGY_DEFAULT_MIN_GAMES = 6
 HERO_SYNERGY_DEFAULT_TOP_N = 25
 
-HERO_IMG_PER_PAGE = 15
+HERO_IMG_PER_PAGE = 18
 HERO_IMG_MAX_PAGES = 5
 
 
@@ -7392,7 +7388,7 @@ def _render_hero_tierlist_card(
     pages: int,
     total_picks: int,
 ) -> io.BytesIO:
-    W, H = 1650, 1080
+    W, H = 1500, 980
     pad = 26
 
     bg = (20, 20, 26)
@@ -7437,7 +7433,7 @@ def _render_hero_tierlist_card(
     draw.text((x_kda, y), "Avg K/D/A", font=body_font, fill=muted)
     draw.text((x_time, y), "Time", font=body_font, fill=muted)
 
-    y += 34
+    y += 28
     draw.line([(pad * 2, y), (W - pad * 2, y)], fill=line, width=2)
     y += 14
 
@@ -7456,7 +7452,7 @@ def _render_hero_tierlist_card(
         draw.text((x_pickp, y), pick_txt, font=body_font, fill=text)
         draw.text((x_kda, y), kda_txt, font=body_font, fill=text)
         draw.text((x_time, y), time_txt, font=body_font, fill=text)
-        y += 44
+        y += 32
 
     y_footer = H - pad - 58
     footer = (
@@ -7479,7 +7475,7 @@ def _render_hero_synergy_card(
     page: int,
     pages: int,
 ) -> io.BytesIO:
-    W, H = 1650, 1080
+    W, H = 1500, 980
     pad = 26
 
     bg = (20, 20, 26)
@@ -7519,7 +7515,7 @@ def _render_hero_synergy_card(
     draw.text((x_games, y), "Games", font=body_font, fill=muted)
     draw.text((x_wins, y), "Wins", font=body_font, fill=muted)
 
-    y += 34
+    y += 28
     draw.line([(pad * 2, y), (W - pad * 2, y)], fill=line, width=2)
     y += 14
 
@@ -7533,7 +7529,7 @@ def _render_hero_synergy_card(
         draw.text((x_win, y), win_txt, font=body_font, fill=text)
         draw.text((x_games, y), str(games), font=body_font, fill=text)
         draw.text((x_wins, y), str(wins), font=body_font, fill=text)
-        y += 44
+        y += 32
 
     y_footer = H - pad - 58
     footer = (
@@ -9131,7 +9127,7 @@ def _so_draw_role_triangle_panel(draw, x0: int, y0: int, w: int, h: int,
 # (Only change: replace the right-side H2H panel with the Role Distribution triangle panel.)
 # ------------------------------------------------------------------------------------------------------------
 def _render_session_overview_image_api(session_date, session_labels, session_df, standings_df_after):
-    body_font, title_font = get_fonts(body_pt=27, title_pt=46)
+    body_font, title_font = get_fonts()
 
     bg = (25, 25, 25)
     fg = (230, 230, 230)
@@ -9139,12 +9135,11 @@ def _render_session_overview_image_api(session_date, session_labels, session_df,
     header_bg = (40, 40, 40)
     grid = (80, 80, 80)
 
-    pad = 28
-    title_h = 126
-    section_gap = 36
-    header_h = 66
-    row_h = 56
-    section_label_h = 40
+    pad = 20
+    title_h = 100
+    section_gap = 26
+    header_h = 54
+    row_h = 44
 
     A_headers = [
         "Player", "W/L", "Win%", "AvgKDA", "AvgDmg", "AvgHeal", "AvgTaken",
@@ -9161,7 +9156,7 @@ def _render_session_overview_image_api(session_date, session_labels, session_df,
             f"{int(r['avg_dmg']):,}",
             f"{int(r['avg_heal']):,}",
             f"{int(r['avg_taken']):,}",
-            str(r.get("top_hero_sess", "—"))[:14],
+            str(r.get("top_hero_sess", "—"))[:18],
             str(int(r.get("mvp", 0))),
             str(int(r.get("svp", 0))),
             str(r.get("badges", "—"))[:48],
@@ -9193,14 +9188,14 @@ def _render_session_overview_image_api(session_date, session_labels, session_df,
             rows = [["—"] * len(headers)]
         for i, h in enumerate(headers):
             vals = [r[i] for r in rows]
-            w = max([_tw(h)] + [_tw(v) for v in vals]) + 34
+            w = max([_tw(h)] + [_tw(v) for v in vals]) + 24
             cols.append(int(min(maxs[i], max(mins[i], w))))
         return cols
 
-    A_min = [250, 105, 105, 115, 145, 145, 155, 210, 75, 75, 340]
-    A_max = [390, 130, 130, 145, 185, 185, 205, 280, 95, 95, 560]
-    B_min = [290, 140, 140, 165]
-    B_max = [420, 180, 180, 240]
+    A_min = [220, 90, 90, 95, 120, 120, 130, 140, 60, 60, 300]
+    A_max = [360, 110, 110, 120, 160, 160, 180, 200, 80, 80, 520]
+    B_min = [260, 120, 120, 140]
+    B_max = [380, 160, 160, 220]
 
     A_col = _fit_cols(A_headers, A_rows, A_min, A_max)
     B_col = _fit_cols(B_headers, B_rows, B_min, B_max)
@@ -9209,7 +9204,7 @@ def _render_session_overview_image_api(session_date, session_labels, session_df,
 
     A_h = header_h + row_h * max(1, len(A_rows))
     B_h = header_h + row_h * max(1, len(B_rows))
-    total_h = pad + title_h + pad + section_label_h + A_h + section_gap + section_label_h + B_h + pad
+    total_h = pad + title_h + pad + 28 + A_h + section_gap + 28 + B_h + pad
 
     img = Image.new("RGB", (int(width), int(total_h)), bg)
     d = ImageDraw.Draw(img)
@@ -9226,7 +9221,7 @@ def _render_session_overview_image_api(session_date, session_labels, session_df,
         for i, h in enumerate(heads):
             x = xs[i]
             d.rectangle([x, y0, x + cols[i], y0 + header_h], fill=header_bg, outline=grid)
-            d.text((x + 14, y0 + 18), h, font=body_font, fill=fg)
+            d.text((x + 10, y0 + 14), h, font=body_font, fill=fg)
 
         y1 = y0 + header_h
         if not rows:
@@ -9235,17 +9230,17 @@ def _render_session_overview_image_api(session_date, session_labels, session_df,
             for i, c_ in enumerate(r_):
                 x = xs[i]
                 d.rectangle([x, y1, x + cols[i], y1 + row_h], outline=grid)
-                d.text((x + 14, y1 + 15), str(c_), font=body_font, fill=fg)
+                d.text((x + 10, y1 + 10), str(c_), font=body_font, fill=fg)
             y1 += row_h
         return y1
 
     d.text((pad, y), "Session Records (API)", font=body_font, fill=gold)
-    y += section_label_h
+    y += 28
     y = draw_table(y, A_headers, A_rows, A_col)
 
     y += section_gap
     d.text((pad, y), "Season Standings (change after session)", font=body_font, fill=gold)
-    y += section_label_h
+    y += 28
     y_b_table_top = y
     y_b_table_end = draw_table(y, B_headers, B_rows, B_col)
 
@@ -9311,16 +9306,16 @@ def _render_session_pairs_underdog_image_api(session_date, session_labels,
                                              order_uids, uneven, underdog_wins,
                                              low_team_rows, bans_list,
                                              picks_list):
-    body_font, title_font = get_fonts(body_pt=26, title_pt=44)
+    body_font, title_font = get_fonts()
     bg = (25, 25, 25)
     fg = (230, 230, 230)
     gold = (255, 215, 0)
     grid = (80, 80, 80)
-    pad = 28
-    title_h = 126
-    row_h = 52
-    gap = 34
-    header_h = 64
+    pad = 20
+    title_h = 100
+    row_h = 40
+    gap = 26
+    header_h = 54
     header_bg = (40, 40, 40)
 
     bold_font = body_font
@@ -9340,10 +9335,10 @@ def _render_session_pairs_underdog_image_api(session_date, session_labels,
             for row_uid in order_uids:
                 cell_len = max(cell_len, _len(str(matrix_df.loc[row_uid,
                                                                 uid])))
-            col_widths.append(int(max(header_len, cell_len) + 40))
+            col_widths.append(int(max(header_len, cell_len) + 30))
         row_label_width = int(
             max(_len(name_by_uid.get(uid, str(uid)))
-                for uid in order_uids) + 40)
+                for uid in order_uids) + 30)
     else:
         col_headers, col_widths, row_label_width = [], [], 240
 
@@ -9352,7 +9347,7 @@ def _render_session_pairs_underdog_image_api(session_date, session_labels,
                                                                       row_h)
 
     C_headers = ["Player", "On Less", "Uneven", "% on Less", "Win% on Less"]
-    C_cols = [360, 165, 165, 190, 215]
+    C_cols = [320, 140, 140, 160, 180]
     C_h = header_h + row_h * max(1, len(low_team_rows))
 
     # Estimate wrapped bans/picks height BEFORE creating the image
@@ -9389,8 +9384,8 @@ def _render_session_pairs_underdog_image_api(session_date, session_labels,
     bans_lines_n = _wrap_tokens_measure(bans_txt, max_text_w)
     picks_lines_n = _wrap_tokens_measure(picks_txt, max_text_w)
 
-    bans_h = 38 + (bans_lines_n * line_h) + 22  # label gap + lines + spacing
-    picks_h = 38 + (picks_lines_n * line_h) + 22
+    bans_h = 30 + (bans_lines_n * line_h) + 18  # label gap + lines + spacing
+    picks_h = 30 + (picks_lines_n * line_h) + 18
 
     width = max(matrix_width, sum(C_cols) + pad * 2)
     total_h = pad + title_h + pad + matrix_height + gap + 34 + bans_h + 18 + picks_h + gap + 40 + gap + C_h + pad
@@ -9485,20 +9480,20 @@ def _render_session_pairs_underdog_image_api(session_date, session_labels,
         return lines if lines else ["—"]
 
     d.text((pad, y), "Top Bans (session)", font=body_font, fill=gold)
-    y += 38
+    y += 30
     bans_txt = " • ".join([f"{nm}×{ct}"
                            for nm, ct in bans_list]) if bans_list else "—"
     bans_lines = _wrap_tokens(bans_txt, max_text_w)
     for ln in bans_lines:
         d.text((pad, y), ln, font=body_font, fill=fg)
         y += line_h
-    y += 22
+    y += 18
 
     d.text((pad, y),
            "Top Picks (by total time, humans)",
            font=body_font,
            fill=gold)
-    y += 38
+    y += 30
     picks_txt = " • ".join(
         [f"{nm}({_fmt_time(sec)})"
          for nm, sec in picks_list]) if picks_list else "—"
@@ -9506,16 +9501,16 @@ def _render_session_pairs_underdog_image_api(session_date, session_labels,
     for ln in picks_lines:
         d.text((pad, y), ln, font=body_font, fill=fg)
         y += line_h
-    y += 22
+    y += 18
 
     # underdog summary
     y += gap
     summary = f"Uneven games: {uneven}   •   Smaller team won: {underdog_wins}"
     d.text((pad, y), summary, font=body_font, fill=gold)
-    y += 44
+    y += 36
 
     d.text((pad, y), "Session Low-Team (condensed)", font=body_font, fill=gold)
-    y += 38
+    y += 28
 
     def draw_table(y0, heads, rows, cols):
         xs = [pad + sum(cols[:i]) for i in range(len(cols))]
@@ -9524,7 +9519,7 @@ def _render_session_pairs_underdog_image_api(session_date, session_labels,
             d.rectangle([x, y0, x + cols[i], y0 + header_h],
                         fill=header_bg,
                         outline=grid)
-            d.text((x + 14, y0 + 17), h, font=body_font, fill=fg)
+            d.text((x + 10, y0 + 14), h, font=body_font, fill=fg)
         y1 = y0 + header_h
         if not rows:
             rows = [["—"] * len(heads)]
@@ -9532,7 +9527,7 @@ def _render_session_pairs_underdog_image_api(session_date, session_labels,
             for i, c_ in enumerate(r_):
                 x = xs[i]
                 d.rectangle([x, y1, x + cols[i], y1 + row_h], outline=grid)
-                d.text((x + 14, y1 + 14), str(c_), font=body_font, fill=fg)
+                d.text((x + 10, y1 + 10), str(c_), font=body_font, fill=fg)
             y1 += row_h
         return y1
 
@@ -10165,10 +10160,10 @@ async def leaderboard_image(ctx, mode: str = None):
         x_positions = [sum(col_widths[:i]) + 20 for i in range(len(col_widths))]
         width = x_positions[-1] + col_widths[-1] + 20
 
-        row_height = 54
-        header_height = 68
+        row_height = 45
+        header_height = 60
         title_height = 55
-        section_height = 58
+        section_height = 48
         gap_height = 18
 
         n_main = len(df_main)
@@ -10377,8 +10372,8 @@ async def leaderboard_image(ctx, mode: str = None):
         ]
         width = x_positions[-1] + col_widths[-1] + 20
 
-        row_height = 54
-        header_height = 68
+        row_height = 45
+        header_height = 60
         title_height = 55
         section_height = 48
         gap_height = 18
@@ -10938,8 +10933,8 @@ async def teammate_matrix_fair(ctx):
         font = ImageFont.load_default()
         title_font = ImageFont.load_default()
 
-    padding = 28
-    row_height = 52
+    padding = 20
+    row_height = 40
 
     # compute column widths based on header & cell content (cap to avoid absurd widths)
     col_widths = []
@@ -10948,12 +10943,12 @@ async def teammate_matrix_fair(ctx):
         cell_w = max(
             font.getlength(str(matrix.iloc[row_idx, col_idx]))
             for row_idx in range(len(matrix)))
-        w = int(max(header_w, cell_w)) + 40
-        col_widths.append(min(w, 300))  # cap
+        w = int(max(header_w, cell_w)) + 30
+        col_widths.append(min(w, 260))  # cap
 
     row_label_width = int(
-        max(font.getlength(str(name)) for name in matrix.index)) + 40
-    row_label_width = min(row_label_width, 320)  # cap
+        max(font.getlength(str(name)) for name in matrix.index)) + 30
+    row_label_width = min(row_label_width, 280)  # cap
 
     width = int(row_label_width + sum(col_widths) + padding * 2)
 
@@ -11159,8 +11154,8 @@ async def teammate_matrix_lowteam_fair(ctx):
         font = ImageFont.load_default()
         title_font = ImageFont.load_default()
 
-    padding = 28
-    row_height = 52
+    padding = 20
+    row_height = 40
 
     # compute column widths based on header & cell content (cap to avoid absurd widths)
     col_widths = []
@@ -11170,11 +11165,11 @@ async def teammate_matrix_lowteam_fair(ctx):
             font.getlength(str(matrix.iloc[row_idx, col_idx]))
             for row_idx in range(len(matrix))
         )
-        w = int(max(header_w, cell_w)) + 40
-        col_widths.append(min(w, 300))
+        w = int(max(header_w, cell_w)) + 30
+        col_widths.append(min(w, 260))
 
-    row_label_width = int(max(font.getlength(str(name)) for name in matrix.index)) + 40
-    row_label_width = min(row_label_width, 320)
+    row_label_width = int(max(font.getlength(str(name)) for name in matrix.index)) + 30
+    row_label_width = min(row_label_width, 280)
 
     width = int(row_label_width + sum(col_widths) + padding * 2)
 
@@ -11347,13 +11342,13 @@ async def win_matrix(ctx):
     title_h = 72
 
     # Separate header height from cell height (helps names across top)
-    header_h = 72
-    cell_h = 68
+    header_h = 62
+    cell_h = 58
 
     # Use slightly smaller fonts than global defaults so 2 lines fit cleanly
     try:
-        cell_font, title_font = get_fonts(body_pt=26, title_pt=42)
-        header_font, _ = get_fonts(body_pt=28, title_pt=42)
+        cell_font, title_font = get_fonts(body_pt=24, title_pt=38)
+        header_font, _ = get_fonts(body_pt=26, title_pt=38)
     except Exception:
         cell_font = ImageFont.load_default()
         header_font = ImageFont.load_default()
@@ -11434,10 +11429,10 @@ async def win_matrix(ctx):
         max_header_px = max((len(nm) for nm in display_names), default=0) * 12
 
     # Column width tuned to longest header; capped so images don't become absurdly wide
-    cell_w = int(max(150, min(270, max_header_px + 32)))
+    cell_w = int(max(130, min(240, max_header_px + 24)))
 
     # Row label width tuned similarly; give a little more room than cells
-    row_label_w = int(max(250, min(380, max_header_px + 48)))
+    row_label_w = int(max(220, min(340, max_header_px + 40)))
 
     # Canvas size
     width = padding * 2 + row_label_w + cell_w * len(norm_players)
@@ -11655,7 +11650,7 @@ def create_2v2_records_image(results, title="2v2 (Humans) Records"):
 
     Returns: BytesIO PNG buffer
     """
-    body_font, title_font = get_fonts(body_pt=26, title_pt=42)
+    body_font, title_font = get_fonts()
 
     bg = (25, 25, 25)
     fg = (230, 230, 230)
@@ -11685,10 +11680,10 @@ def create_2v2_records_image(results, title="2v2 (Humans) Records"):
     if not rows:
         rows = [["—", "0", "0", "0", "0/0", "0.0%"]]
 
-    pad = 28
-    title_h = 108
-    header_h = 64
-    row_h = 54
+    pad = 20
+    title_h = 92
+    header_h = 54
+    row_h = 44
 
     tmp = Image.new("RGB", (10, 10), bg)
     td = ImageDraw.Draw(tmp)
@@ -11702,7 +11697,7 @@ def create_2v2_records_image(results, title="2v2 (Humans) Records"):
 
     col_w = []
     for i, h in enumerate(headers):
-        w = max(_tw(h), max(_tw(r[i]) for r in rows)) + 34
+        w = max(_tw(h), max(_tw(r[i]) for r in rows)) + 26
         col_w.append(int(min(maxs[i], max(mins[i], w))))
 
     width = sum(col_w) + pad * 2
@@ -11722,7 +11717,7 @@ def create_2v2_records_image(results, title="2v2 (Humans) Records"):
     x = pad
     for i, h in enumerate(headers):
         d.rectangle([x, y, x + col_w[i], y + header_h], fill=header_bg, outline=grid)
-        d.text((x + 14, y + 17), h, font=body_font, fill=fg)
+        d.text((x + 10, y + 14), h, font=body_font, fill=fg)
         x += col_w[i]
 
     # Data rows
@@ -11731,7 +11726,7 @@ def create_2v2_records_image(results, title="2v2 (Humans) Records"):
         x = pad
         for i, cell in enumerate(r):
             d.rectangle([x, y, x + col_w[i], y + row_h], outline=grid)
-            d.text((x + 14, y + 14), str(cell), font=body_font, fill=fg)
+            d.text((x + 10, y + 10), str(cell), font=body_font, fill=fg)
             x += col_w[i]
         y += row_h
 
@@ -12780,9 +12775,9 @@ def _profile_draw_role_mix_bar(draw, x, y, w, h, share: dict[str, float]):
 
 def _render_profile_dashboard(player_name: str, pack: dict) -> io.BytesIO:
     # Canvas
-    W, H = 2240, 1540
-    pad = 30
-    gap = 22
+    W, H = 2000, 1300
+    pad = 26
+    gap = 18
 
     bg = (20, 20, 26)
     card = (32, 32, 44)
@@ -12795,7 +12790,7 @@ def _render_profile_dashboard(player_name: str, pack: dict) -> io.BytesIO:
     img = Image.new("RGB", (W, H), bg)
     draw = ImageDraw.Draw(img)
 
-    body_font, title_font = get_fonts(body_pt=26, title_pt=46)
+    body_font, title_font = get_fonts(body_pt=22, title_pt=40)
 
     draw.rounded_rectangle([pad, pad, W - pad, H - pad], radius=22, fill=card)
 
@@ -12809,19 +12804,19 @@ def _render_profile_dashboard(player_name: str, pack: dict) -> io.BytesIO:
     t = pack["totals"]
     meta = (f"{t['games']} games • {t['wins']}-{t['losses']} ({t['win_pct']:.1f}%)"
             f" • Streak {pack['streak_txt']} • Last10 {pack['form10']}")
-    draw.text((pad * 2, header_y + 56), meta, font=body_font, fill=muted)
+    draw.text((pad * 2, header_y + 46), meta, font=body_font, fill=muted)
 
     # Grid
-    top_y = header_y + 112
+    top_y = header_y + 92
     col_w = (W - pad * 4 - gap * 2) // 3
     x1 = pad * 2
     x2 = x1 + col_w + gap
     x3 = x2 + col_w + gap
-    row1_h = 620
+    row1_h = 520
     y1 = top_y
     y2 = y1 + row1_h + gap
     wide_w = (W - pad * 4 - gap) // 2
-    row2_h = (H - pad * 2) - y2 - 72
+    row2_h = (H - pad * 2) - y2
 
     def panel(x, y, w, h, title):
         draw.rounded_rectangle([x, y, x + w, y + h], radius=18, outline=line, width=2)
@@ -12835,7 +12830,7 @@ def _render_profile_dashboard(player_name: str, pack: dict) -> io.BytesIO:
 
     # Panel A: Snapshot (no bars)
     px = x1 + 18
-    py = y1 + 64
+    py = y1 + 54
 
     label_x = px
     value_x = px + 230
@@ -12847,37 +12842,37 @@ def _render_profile_dashboard(player_name: str, pack: dict) -> io.BytesIO:
         pct_val = m.get("pct")
         pct_txt = "—" if pct_val is None else f"{pct_val:.0f}th"
         draw.text((pct_x, py), pct_txt, font=body_font, fill=text)
-        py += 48
+        py += 40
 
     # Panel B: Role mix + signature heroes (performance)
     bx = x2 + 18
-    by = y1 + 64
+    by = y1 + 54
     draw.text((bx, by), "Role mix (time share)", font=body_font, fill=muted)
-    by += 36
-    _profile_draw_role_mix_bar(draw, bx, by, col_w - 36, 26, pack["role_share"])
-    by += 42
+    by += 30
+    _profile_draw_role_mix_bar(draw, bx, by, col_w - 36, 22, pack["role_share"])
+    by += 34
 
     rs = pack["role_share"]
     draw.text((bx, by),
               f"Vanguard {rs['Vanguard']*100:.0f}%   Duelist {rs['Duelist']*100:.0f}%   Strategist {rs['Strategist']*100:.0f}%",
               font=body_font,
               fill=text)
-    by += 58
+    by += 50
 
     draw.text((bx, by), "Signature heroes (top 5 by win%, ≥5 games)", font=body_font, fill=muted)
-    by += 36
+    by += 30
 
     # Shift columns LEFT so WR shows game count fully
     hero_col = bx
     time_col = bx + 270
-    wr_col = bx + 430
-    kda_col = bx + 590
+    wr_col = bx + 380
+    kda_col = bx + 520
 
     draw.text((hero_col, by), "Hero", font=body_font, fill=muted)
     draw.text((time_col, by), "Time", font=body_font, fill=muted)
     draw.text((wr_col, by), "WR", font=body_font, fill=muted)
     draw.text((kda_col, by), "KDA", font=body_font, fill=muted)
-    by += 34
+    by += 26
 
     sig = pack.get("signature_heroes", []) or []
     if not sig:
@@ -12890,11 +12885,11 @@ def _render_profile_dashboard(player_name: str, pack: dict) -> io.BytesIO:
             draw.text((time_col, by), _fmt_time(h["seconds"]), font=body_font, fill=text)
             draw.text((wr_col, by), f"{h['win_pct']:.0f}% ({h['games']}g)", font=body_font, fill=text)
             draw.text((kda_col, by), f"{h['kda']:.2f}", font=body_font, fill=text)
-            by += 40
+            by += 32
 
     # Panel C: Best role + TEAMMATE HERO win/avoid
     cx = x3 + 18
-    cy = y1 + 64
+    cy = y1 + 54
 
     br = pack.get("best_role")
     if br:
@@ -12904,10 +12899,10 @@ def _render_profile_dashboard(player_name: str, pack: dict) -> io.BytesIO:
                   fill=text)
     else:
         draw.text((cx, cy), "Best primary role: —", font=body_font, fill=text)
-    cy += 52
+    cy += 44
 
     draw.text((cx, cy), "Win conditions teammates (top 3 heroes)", font=body_font, fill=muted)
-    cy += 36
+    cy += 30
 
     tw = pack.get("teammate_hero_win", []) or []
     if tw:
@@ -12918,14 +12913,14 @@ def _render_profile_dashboard(player_name: str, pack: dict) -> io.BytesIO:
                       f"• {hn}: {h['win_pct']:.0f}% ({h['games']}g)",
                       font=body_font,
                       fill=text)
-            cy += 38
+            cy += 30
     else:
         draw.text((cx, cy), "—", font=body_font, fill=text)
-        cy += 38
+        cy += 30
 
     cy += 14
     draw.text((cx, cy), "Avoid / risk teammates (bottom 3 heroes)", font=body_font, fill=muted)
-    cy += 36
+    cy += 30
 
     tr = pack.get("teammate_hero_risk", []) or []
     if tr:
@@ -12936,23 +12931,23 @@ def _render_profile_dashboard(player_name: str, pack: dict) -> io.BytesIO:
                       f"• {hn}: {h['win_pct']:.0f}% ({h['games']}g)",
                       font=body_font,
                       fill=text)
-            cy += 38
+            cy += 30
     else:
         draw.text((cx, cy), "—", font=body_font, fill=text)
-        cy += 38
+        cy += 30
 
     # Panel D: Chemistry (no deltas)
     dx = x1 + 18
-    dy = y2 + 64
+    dy = y2 + 54
     chem = pack["chemistry"]
     draw.text((dx, dy),
               f"Eligible games: {chem.get('eligible_games',0)} • Baseline WR: {chem.get('baseline',0.0):.1f}%",
               font=body_font,
               fill=muted)
-    dy += 48
+    dy += 40
 
     draw.text((dx, dy), "Best allies", font=body_font, fill=accent)
-    dy += 36
+    dy += 30
     if chem["best"]:
         for a in chem["best"]:
             nm = _profile_clip_text(draw, a["player"], body_font, wide_w - 60)
@@ -12960,14 +12955,14 @@ def _render_profile_dashboard(player_name: str, pack: dict) -> io.BytesIO:
                       f"• {nm}: {a['win_pct']:.0f}% ({a['wins']}/{a['games']})",
                       font=body_font,
                       fill=text)
-            dy += 38
+            dy += 30
     else:
         draw.text((dx, dy), "—", font=body_font, fill=text)
-        dy += 38
+        dy += 30
 
     dy += 10
     draw.text((dx, dy), "Worst pairings", font=body_font, fill=accent)
-    dy += 36
+    dy += 30
     if chem["worst"]:
         for a in chem["worst"]:
             nm = _profile_clip_text(draw, a["player"], body_font, wide_w - 60)
@@ -12975,14 +12970,14 @@ def _render_profile_dashboard(player_name: str, pack: dict) -> io.BytesIO:
                       f"• {nm}: {a['win_pct']:.0f}% ({a['wins']}/{a['games']})",
                       font=body_font,
                       fill=text)
-            dy += 38
+            dy += 30
     else:
         draw.text((dx, dy), "—", font=body_font, fill=text)
-        dy += 38
+        dy += 30
 
     dy += 10
     draw.text((dx, dy), "Under-used synergy", font=body_font, fill=accent)
-    dy += 36
+    dy += 30
     u = chem.get("underused")
     if u:
         nm = _profile_clip_text(draw, u["player"], body_font, wide_w - 60)
@@ -12995,41 +12990,41 @@ def _render_profile_dashboard(player_name: str, pack: dict) -> io.BytesIO:
 
     # Panel E: Momentum + bans (no deltas)
     ex = x1 + wide_w + gap + 18
-    ey = y2 + 64
+    ey = y2 + 54
     m10 = pack["momentum"]
 
     draw.text((ex, ey), "Last 10 games momentum", font=body_font, fill=accent)
-    ey += 42
+    ey += 34
 
     if m10["games"]:
         draw.text((ex, ey), f"Win%: {m10['win_pct']:.1f}%", font=body_font, fill=text)
-        ey += 36
+        ey += 28
         draw.text((ex, ey), f"Deaths/G: {m10['deaths_pg']:.2f}", font=body_font, fill=text)
-        ey += 36
+        ey += 28
         draw.text((ex, ey), f"Final Hits/G: {m10['fh_pg']:.2f}", font=body_font, fill=text)
     else:
         draw.text((ex, ey), "Not enough data.", font=body_font, fill=text)
-    ey += 52
+    ey += 44
 
     bans = pack["enemy_bans"]
     draw.text((ex, ey),
               f"Enemy ban pressure (eligible games: {bans['games']})",
               font=body_font,
               fill=accent)
-    ey += 42
+    ey += 34
 
     if bans["top"]:
         for b in bans["top"]:
             hn = pack["hero_names"].get(b["hero_id"], str(b["hero_id"]))
             hn = _profile_clip_text(draw, hn, body_font, wide_w - 240)
             draw.text((ex, ey), f"• {hn}: {b['count']} ({b['pct']:.0f}%)", font=body_font, fill=text)
-            ey += 36
+            ey += 28
     else:
         draw.text((ex, ey), "—", font=body_font, fill=text)
 
     # Footer
     foot = "Percentiles are against humans with ≥5 games. Accuracy shown only where session_hit_rate exists."
-    draw.text((pad * 2, H - pad - 44), foot, font=body_font, fill=muted)
+    draw.text((pad * 2, H - pad - 28), foot, font=body_font, fill=muted)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -13560,7 +13555,7 @@ def _role_wr_build_teammate_rows(match_rows: list[dict],
 
 def _role_wr_render_overall_image(season_id: int, rows: list[dict]) -> io.BytesIO:
     pad = 26
-    row_h = 44
+    row_h = 34
     table_rows = max(1, len(rows))
     extra_h = 220
 
@@ -13659,7 +13654,7 @@ def _role_wr_render_teammate_image(
     rows: list[dict]
 ) -> io.BytesIO:
     pad = 26
-    row_h = 44
+    row_h = 34
     table_rows = max(1, len(rows))
     extra_h = 220
 
@@ -15049,8 +15044,8 @@ def _h2h_render_matchup_image(
         return buf
 
     try:
-        body_font, title_font = get_fonts(body_pt=28, title_pt=48)
-        small_font, _ = get_fonts(body_pt=23, title_pt=38)
+        body_font, title_font = get_fonts(body_pt=24, title_pt=44)
+        small_font, _ = get_fonts(body_pt=20, title_pt=34)
     except Exception:
         body_font = title_font = small_font = None
 
@@ -15189,11 +15184,11 @@ def _h2h_render_matchup_image(
         ]
 
     # Geometry
-    W = 1420
-    pad = 34
-    row_h = 56
-    col_gap = 24
-    label_w = 285
+    W = 1200
+    pad = 30
+    row_h = 46
+    col_gap = 20
+    label_w = 240
     col_w = (W - pad * 2 - label_w - col_gap * 2) // 2
     ax = pad
     lx = pad + col_w + col_gap
@@ -15780,10 +15775,10 @@ def create_low_team_image_with_percent(results,
     if not rows:
         rows = [["—", "0", "0", "0.0%", "0.0%", "—"]]
 
-    pad = 28
-    title_h = 108
-    header_h = 64
-    row_h = 54
+    pad = 20
+    title_h = 92
+    header_h = 54
+    row_h = 44
 
     # Measure text widths for auto-fit columns
     tmp = Image.new("RGB", (10, 10), bg)
@@ -15798,7 +15793,7 @@ def create_low_team_image_with_percent(results,
 
     col_w = []
     for i, h in enumerate(headers):
-        w = max(_tw(h), max(_tw(r[i]) for r in rows)) + 34
+        w = max(_tw(h), max(_tw(r[i]) for r in rows)) + 26
         col_w.append(int(min(maxs[i], max(mins[i], w))))
 
     width = sum(col_w) + pad * 2
@@ -15821,7 +15816,7 @@ def create_low_team_image_with_percent(results,
         d.rectangle([x, y, x + col_w[i], y + header_h],
                     fill=header_bg,
                     outline=grid)
-        d.text((x + 14, y + 17), h, font=body_font, fill=fg)
+        d.text((x + 10, y + 14), h, font=body_font, fill=fg)
         x += col_w[i]
 
     # Data rows
@@ -15830,7 +15825,7 @@ def create_low_team_image_with_percent(results,
         x = pad
         for i, cell in enumerate(r):
             d.rectangle([x, y, x + col_w[i], y + row_h], outline=grid)
-            d.text((x + 14, y + 14), str(cell), font=body_font, fill=fg)
+            d.text((x + 10, y + 10), str(cell), font=body_font, fill=fg)
             x += col_w[i]
         y += row_h
 
@@ -17070,8 +17065,6 @@ def _ss_draw_role_ternary_plot(draw: "ImageDraw.ImageDraw",
     # dot plotting (with small cycling label offsets)
     offsets = [(10, -14), (10, 4), (-10, -14), (-10, 4), (14, -6), (-14, -6)]
 
-    label_limit = len(role_rows) if len(role_rows) <= 12 else 6
-
     for idx, r in enumerate(role_rows):
         uid = int(r.get("player_uid", 0))
         v = float(r.get("v", 0.0))
@@ -17085,9 +17078,6 @@ def _ss_draw_role_ternary_plot(draw: "ImageDraw.ImageDraw",
         rr = SS_ROLE_DOT_R
         draw.ellipse([px - rr, py - rr, px + rr, py + rr], fill=accent, outline=(0, 0, 0), width=1)
 
-        if idx >= label_limit:
-            continue
-
         name = _ss_clip(player_names.get(uid, f"UID_{uid}"), SS_ROLE_LABEL_MAX)
         dx, dy = offsets[idx % len(offsets)]
         tx = px + dx
@@ -17098,12 +17088,6 @@ def _ss_draw_role_ternary_plot(draw: "ImageDraw.ImageDraw",
         ty = max(float(y_plot), min(ty, float(y_plot + h_plot) - LH))
 
         draw.text((tx, ty), name, font=body_font, fill=text)
-
-    if label_limit < len(role_rows):
-        note = f"Labels show top {label_limit} by role-play time; all {len(role_rows)} players remain plotted."
-        while note and _tw(note + "…") > width:
-            note = note[:-1]
-        draw.text((x, y_plot), note + ("…" if note else ""), font=body_font, fill=muted)
 
 
 # -----------------------------
@@ -17124,8 +17108,8 @@ def _ss_render(season_id: int,
     if Image is None:
         raise RuntimeError("PIL not available")
 
-    W, H = 2140, 1640
-    pad = 30
+    W, H = 1850, 1380
+    pad = 26
 
     bg = (20, 20, 26)
     card = (32, 32, 44)
@@ -17138,7 +17122,7 @@ def _ss_render(season_id: int,
     draw = ImageDraw.Draw(img)
 
     try:
-        fonts = get_fonts(body_pt=27, title_pt=46)
+        fonts = get_fonts()
         if isinstance(fonts, tuple) and len(fonts) >= 2:
             body_font = fonts[0]
             title_font = fonts[1]
@@ -17162,10 +17146,10 @@ def _ss_render(season_id: int,
     draw.text((pad * 2, int(pad * 2.6)), "  •  ".join(subtitle_parts), font=body_font, fill=muted)
 
     left_x = pad * 2
-    right_x = int(W * 0.535)
+    right_x = int(W * 0.54)
     top_y = int(pad * 3.95)
-    LH = 35
-    SEC_W = 965
+    LH = 28
+    SEC_W = 820
 
     def _tw(s: str) -> float:
         try:
@@ -17555,7 +17539,7 @@ def _rd_render_role_bar_chart(*,
                              role_rows: list[dict],
                              player_names: dict[int, str]) -> io.BytesIO:
     # --- canvas / palette (match Season Story vibe) ---
-    W, H = 2100, 1060
+    W, H = 1850, 900
     pad = 26
 
     bg = (20, 20, 26)
@@ -17568,11 +17552,11 @@ def _rd_render_role_bar_chart(*,
     # --- dynamic font sizing based on player count ---
     n = len(role_rows)
     if n <= 14:
-        body_pt, title_pt, label_pt = 22, 38, 18
+        body_pt, title_pt, label_pt = 20, 34, 16
     elif n <= 22:
-        body_pt, title_pt, label_pt = 20, 36, 17
+        body_pt, title_pt, label_pt = 18, 32, 14
     else:
-        body_pt, title_pt, label_pt = 18, 34, 16
+        body_pt, title_pt, label_pt = 16, 30, 12
 
     try:
         body_font, title_font = get_fonts(body_pt=body_pt, title_pt=title_pt)
@@ -17602,7 +17586,7 @@ def _rd_render_role_bar_chart(*,
     top_y = pad * 2 + _rd_line_h(title_font) + LH + 28
     left_x = pad * 2 + 70
     right_x = W - pad * 2
-    bottom_y = H - pad * 2 - 230  # reserve for readable rotated labels
+    bottom_y = H - pad * 2 - 190  # reserve for rotated labels
 
     plot_w = max(10, right_x - left_x)
     plot_h = max(10, bottom_y - top_y)
@@ -19145,15 +19129,15 @@ def _pregame_teammate_matrix_fair_image_filtered(allowed: set[str], season_id: i
         font = ImageFont.load_default()
         title_font = ImageFont.load_default()
 
-    padding = 28
-    row_height = 52
-    row_label_width = min(int(max(font.getlength(str(name)) for name in df.index)) + 40, 320)
+    padding = 20
+    row_height = 40
+    row_label_width = min(int(max(font.getlength(str(name)) for name in df.index)) + 30, 280)
 
     col_widths = []
     for col_idx, col in enumerate(df.columns):
         header_w = font.getlength(str(col))
         cell_w = max(font.getlength(str(df.iloc[row_idx, col_idx])) for row_idx in range(len(df)))
-        w = min(int(max(header_w, cell_w)) + 40, 300)
+        w = min(int(max(header_w, cell_w)) + 30, 260)
         col_widths.append(w)
 
     width = int(row_label_width + sum(col_widths) + padding * 2)
@@ -19349,10 +19333,10 @@ def _pregame_leaderboard_image_filtered(allowed: set[str], season_id: int) -> io
     x_positions = [sum(col_widths[:i]) + 20 for i in range(len(col_widths))]
     width = x_positions[-1] + col_widths[-1] + 20
 
-    row_h = 54
-    header_h = 68
-    title_h = 64
-    section_h = 58
+    row_h = 45
+    header_h = 60
+    title_h = 55
+    section_h = 48
     gap_h = 18
 
     n_main = len(df_main)
@@ -19475,7 +19459,7 @@ async def _pregame_role_triangle_image_filtered(allowed: set[str], season_id: in
 
     names_map = {uid: _ss_player_name(season_id, uid) for uid in uids}
 
-    W, H = 1200, 920
+    W, H = 980, 760
     pad = 26
     bg = (20, 20, 26)
     card = (32, 32, 44)
@@ -19514,7 +19498,7 @@ async def _pregame_role_triangle_image_filtered(allowed: set[str], season_id: in
         role_rows=rr_f,
         player_names=names_map,
         body_font=body_font,
-        LH=32,
+        LH=26,
         accent=accent,
         text=text,
         muted=muted,
@@ -20461,7 +20445,7 @@ def _pregame_determinations_image(allowed: set[str], season_id: int) -> io.Bytes
     except Exception as e:
         change_lines = [f"• Error computing predicted changes: {type(e).__name__}: {e}"]
 
-    W = 1320
+    W = 1100
     pad = 26
     bg = (20, 20, 26)
     card = (32, 32, 44)
@@ -20527,10 +20511,10 @@ def _pregame_determinations_image(allowed: set[str], season_id: int) -> io.Bytes
     wp = _wrap_block(predicted_lines) if predicted_lines else ["• No predicted session leaderboard available."]
     wc = _wrap_block(change_lines) if change_lines else ["• No rank changes predicted."]
 
-    line_h = 36
-    title_h = 76
-    section_h = 52
-    spacer = 24
+    line_h = 28
+    title_h = 64
+    section_h = 44
+    spacer = 20
     bottom = 30
 
     H = (
@@ -20541,7 +20525,7 @@ def _pregame_determinations_image(allowed: set[str], season_id: int) -> io.Bytes
         section_h + len(wc) * line_h +
         bottom
     )
-    H = max(H, 1160)
+    H = max(H, 980)
 
     img = Image.new("RGB", (W, int(H)), bg)
     draw = ImageDraw.Draw(img)
@@ -20557,7 +20541,7 @@ def _pregame_determinations_image(allowed: set[str], season_id: int) -> io.Bytes
     def _section(title: str, lines: list[str]):
         nonlocal y
         draw.text((x, y), title, font=title_font, fill=accent)
-        y += 42
+        y += 34
         draw.line([(x, y), (W - pad * 2, y)], fill=divider, width=2)
         y += 16
         for ln in lines:
@@ -23561,35 +23545,6 @@ async def helpme(ctx):
 # Bot On Ready
 # ============================================================================================================
 # ============================================================================================================
-
-
-@bot.event
-async def on_message(message):
-    if getattr(getattr(message, "author", None), "bot", False):
-        return
-
-    # Keep every existing ! command on the normal discord.py command path.
-    await bot.process_commands(message)
-    if is_command_message(getattr(message, "content", "")):
-        return
-
-    bot_user_id = getattr(getattr(bot, "user", None), "id", None)
-    parsed = strip_bot_mention(getattr(message, "content", "") or "", bot_user_id)
-    if not parsed.mentioned:
-        return
-
-    try:
-        async with message.channel.typing():
-            outcome = await ai_assistant.handle_discord_message(message, bot_user_id)
-    except Exception:
-        await message.reply(DEFAULT_NOT_CONFIGURED_MESSAGE, mention_author=False)
-        return
-
-    if not outcome.handled or not outcome.reply:
-        return
-
-    for chunk in chunk_discord_message(outcome.reply):
-        await message.reply(chunk, mention_author=False)
 
 
 @bot.event
