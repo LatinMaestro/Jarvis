@@ -36,6 +36,9 @@ from itertools import combinations
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
+from features.ai_assistant import JarvisAIAssistant
+from features.ai_assistant.discord_listener import is_command_message, strip_bot_mention
+from features.ai_assistant.response_formatting import DEFAULT_NOT_CONFIGURED_MESSAGE, chunk_discord_message
 
 # =========================
 # Global visual settings
@@ -141,6 +144,7 @@ try:
 except Exception:
     pass
 c = conn.cursor()
+ai_assistant = JarvisAIAssistant(conn)
 
 
 # =========================
@@ -23557,6 +23561,35 @@ async def helpme(ctx):
 # Bot On Ready
 # ============================================================================================================
 # ============================================================================================================
+
+
+@bot.event
+async def on_message(message):
+    if getattr(getattr(message, "author", None), "bot", False):
+        return
+
+    # Keep every existing ! command on the normal discord.py command path.
+    await bot.process_commands(message)
+    if is_command_message(getattr(message, "content", "")):
+        return
+
+    bot_user_id = getattr(getattr(bot, "user", None), "id", None)
+    parsed = strip_bot_mention(getattr(message, "content", "") or "", bot_user_id)
+    if not parsed.mentioned:
+        return
+
+    try:
+        async with message.channel.typing():
+            outcome = await ai_assistant.handle_discord_message(message, bot_user_id)
+    except Exception:
+        await message.reply(DEFAULT_NOT_CONFIGURED_MESSAGE, mention_author=False)
+        return
+
+    if not outcome.handled or not outcome.reply:
+        return
+
+    for chunk in chunk_discord_message(outcome.reply):
+        await message.reply(chunk, mention_author=False)
 
 
 @bot.event
