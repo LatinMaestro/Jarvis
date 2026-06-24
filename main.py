@@ -21933,7 +21933,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
 
     # Weighted random pick among top candidates (rank 1 favoured)
     # Target weights: rank1=45%, rank2=25%, rank3=15%, rank4=10%, rank5=5%
-    WEIGHTS_BY_RANK = [40, 30, 15, 10, 5]
+    WEIGHTS_BY_RANK = [60, 30, 10, 0, 0]
     weights_used = WEIGHTS_BY_RANK[:len(top)]
 
     if len(top) <= 1:
