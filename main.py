@@ -11769,6 +11769,108 @@ async def two_v_two_records(ctx):
     buf = create_2v2_records_image(results, title=title)
     await ctx.send(file=discord.File(fp=buf, filename="2v2_records.png"))
 
+
+# ============================================================================================================
+# COMMAND: 4v4_records - Everyone's W/L when at least 8 HUMANS were present
+#   Same output style as !2v2_records, but eligibility requires minimum 4 humans per team.
+#
+#   Eligible match =
+#     - at least 8 human players total
+#     - split across exactly 2 camps/teams
+#     - at least 4 humans on each camp
+#     - bots may also be present (ignored for eligibility)
+#
+# Usage:
+#   !4v4_records
+# ============================================================================================================
+
+try:
+    bot.remove_command("4v4_records")
+except Exception:
+    pass
+
+
+def _eligible_min_4v4_humans_game_labels_api(season_id: int) -> list[str]:
+    """
+    Returns game_label list where match has at least 8 humans total and at least 4 humans on each of 2 camps.
+    Bots allowed (any number).
+    """
+    ensure_mr_api_tables()
+
+    try:
+        c.execute(
+            """
+            WITH human_by_camp AS (
+                SELECT
+                    season_id,
+                    game_label,
+                    match_uid,
+                    camp,
+                    COUNT(*) AS n
+                FROM mr_player_match
+                WHERE season_id=?
+                  AND COALESCE(is_bot,0)=0
+                  AND camp IS NOT NULL
+                GROUP BY season_id, game_label, match_uid, camp
+            ),
+            per_game AS (
+                SELECT
+                    season_id,
+                    game_label,
+                    match_uid,
+                    SUM(n)       AS human_ct,
+                    COUNT(*)     AS human_camp_ct,
+                    MIN(n)       AS min_humans_same_camp
+                FROM human_by_camp
+                GROUP BY season_id, game_label, match_uid
+            )
+            SELECT game_label
+            FROM per_game
+            WHERE human_ct>=8
+              AND human_camp_ct=2
+              AND min_humans_same_camp>=4
+            ORDER BY game_label ASC
+            """,
+            (int(season_id),),
+        )
+        return [str(r[0]) for r in (c.fetchall() or []) if r and r[0] is not None]
+    except Exception:
+        return []
+
+
+@bot.command(name="4v4_records")
+async def four_v_four_records(ctx):
+    ensure_mr_api_tables()
+
+    season_id_raw = get_current_season_id()
+    season_id = int(str(season_id_raw).split(".", 1)[0])
+
+    labels = _eligible_min_4v4_humans_game_labels_api(season_id)
+    if not labels:
+        await ctx.send(
+            f"No eligible matches found for Season {season_id} with at least **8 humans** split minimum **4v4** (bots ignored)."
+        )
+        return
+
+    df = _aggregate_wl_for_labels_2v2_humans_api(season_id, labels)
+    if df is None or df.empty:
+        await ctx.send(f"No eligible human rows found for Season {season_id} in minimum **4v4** matches.")
+        return
+
+    results = []
+    for _, r in df.iterrows():
+        results.append((
+            str(r["player"]),
+            int(r["games"]),
+            int(r["wins"]),
+            int(r["losses"]),
+            float(r["winrate"]),
+        ))
+
+    title = f"Min 4v4 (Humans) Records - Season {season_id}  |  Matches: {len(labels)}"
+    buf = create_2v2_records_image(results, title=title)
+    await ctx.send(file=discord.File(fp=buf, filename="4v4_records.png"))
+
 # ============================================================================================================
 # !profile — Single-image Scouting Report (API-native, 1 image, NO TOGGLE)
 #
@@ -18558,6 +18660,7 @@ STATS_CHANNELS = {
     "hero_tierlist": "stats-tierlist",
     "hero_synergy": "stats-hero-synergy",
     "2v2_records": "stats-2v2-records",
+    "4v4_records": "stats-4v4-records",
     "profile": "stats-profile",
     "season_movie_pack": "stats-season-movie-pack",
 }
@@ -23476,6 +23579,8 @@ async def helpme(ctx):
                  "Low-team exposure and performance image."),
                 ("!2v2_records",
                  "Everyone’s 2v2 W/L records."),
+                ("!4v4_records",
+                 "Everyone's W/L records for games with at least 4 humans per team."),
                 ("!h2h",
                  "Head-to-head / matchup view. Aliases: !head2head, !head_to_head."),
                 ("!role_distribution",
