@@ -2243,6 +2243,18 @@ def ensure_auto_import_tables():
         )
     """)
 
+    # optional season split windows: overrides midpoint split for !leaderboard_image 0.5
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS mr_season_split_windows (
+            season_id INTEGER NOT NULL,
+            split_label TEXT NOT NULL,
+            start_utc TEXT NOT NULL,
+            end_utc TEXT NOT NULL,
+            note TEXT,
+            PRIMARY KEY (season_id, split_label)
+        )
+    """)
+
     # skipped matches (auto-import + manual): primarily used to track skipped draws
     c.execute("""
         CREATE TABLE IF NOT EXISTS mr_skipped_matches (
@@ -2398,6 +2410,99 @@ def list_season_windows() -> list[dict]:
             "start_bris": su_dt.strftime("%Y-%m-%d") if su_dt else "—",
             "end_bris": eu_dt.strftime("%Y-%m-%d") if eu_dt else "OPEN",
             "note": note or ""
+        })
+    return out
+
+
+def _normalise_season_split_label(split_label: str) -> str:
+    raw = str(split_label or "").strip().lower().replace("_", "-")
+    if raw in ("0", "0.0", "first", "first-half", "firsthalf", "season0"):
+        return "0"
+    if raw in ("0.5", ".5", "5", "half", "second", "second-half", "secondhalf", "season5"):
+        return "0.5"
+    raise ValueError("Split must be `0` or `0.5`.")
+
+
+def set_season_split_window(season_id: int,
+                            split_label: str,
+                            start_bris: str,
+                            end_bris: str,
+                            note: str = ""):
+    ensure_auto_import_tables()
+    label = _normalise_season_split_label(split_label)
+    if not end_bris or str(end_bris).strip().upper() == "OPEN":
+        raise ValueError("Split windows need a concrete end date.")
+
+    start_utc = _bris_to_utc_iso(start_bris, end_of_day=False)
+    end_utc = _bris_to_utc_iso(end_bris, end_of_day=True)
+
+    split_start = _parse_iso_utc(start_utc)
+    split_end = _parse_iso_utc(end_utc)
+    if split_start and split_end and split_start > split_end:
+        raise ValueError("Split start must be on or before the split end.")
+
+    c.execute(
+        """
+        SELECT start_utc, end_utc
+        FROM mr_season_windows
+        WHERE season_id=?
+        """,
+        (int(season_id),),
+    )
+    season_row = c.fetchone()
+    if season_row and season_row[0] and season_row[1]:
+        season_start = _parse_iso_utc(season_row[0])
+        season_end = _parse_iso_utc(season_row[1])
+        if split_start and season_start and split_start < season_start:
+            raise ValueError("Split start must be inside the main season window.")
+        if split_end and season_end and split_end > season_end:
+            raise ValueError("Split end must be inside the main season window.")
+
+    c.execute(
+        """
+        INSERT INTO mr_season_split_windows(season_id, split_label, start_utc, end_utc, note)
+        VALUES(?,?,?,?,?)
+        ON CONFLICT(season_id, split_label) DO UPDATE SET
+            start_utc=excluded.start_utc,
+            end_utc=excluded.end_utc,
+            note=excluded.note
+        """,
+        (int(season_id), label, start_utc, end_utc, (note or "").strip()),
+    )
+    conn.commit()
+
+
+def list_season_split_windows(season_id: int | None = None) -> list[dict]:
+    ensure_auto_import_tables()
+    if season_id is None:
+        c.execute(
+            """
+            SELECT season_id, split_label, start_utc, end_utc, note
+            FROM mr_season_split_windows
+            ORDER BY season_id ASC, split_label ASC
+            """
+        )
+    else:
+        c.execute(
+            """
+            SELECT season_id, split_label, start_utc, end_utc, note
+            FROM mr_season_split_windows
+            WHERE season_id=?
+            ORDER BY split_label ASC
+            """,
+            (int(season_id),),
+        )
+
+    out = []
+    for sid, label, su, eu, note in c.fetchall():
+        su_dt = _parse_iso_utc(su).astimezone(BRIS_TZ) if su else None
+        eu_dt = _parse_iso_utc(eu).astimezone(BRIS_TZ) if eu else None
+        out.append({
+            "season_id": int(sid),
+            "split_label": str(label),
+            "start_bris": su_dt.strftime("%Y-%m-%d") if su_dt else "-",
+            "end_bris": eu_dt.strftime("%Y-%m-%d") if eu_dt else "-",
+            "note": note or "",
         })
     return out
 
@@ -4593,6 +4698,37 @@ async def season_window_set_cmd(ctx,
         )
     except Exception as e:
         await ctx.send(f"Failed to set season window: {e}")
+
+
+@bot.command(name="season_split_window_set",
+             aliases=["season_half_window_set"])
+async def season_split_window_set_cmd(ctx,
+                                      season_id: int = None,
+                                      split_label: str = None,
+                                      start_bris: str = None,
+                                      end_bris: str = None,
+                                      *,
+                                      note: str = ""):
+    """
+    Define exact 0 / 0.5 split windows inside a season (Brisbane time).
+    Usage:
+      !season_split_window_set 8 0 2026-01-01 2026-01-21
+      !season_split_window_set 8 0.5 2026-01-22 2026-02-14
+    """
+    if season_id is None or not split_label or not start_bris or not end_bris:
+        await ctx.send(
+            "Usage: `!season_split_window_set <season_id> <0|0.5> <YYYY-MM-DD> <YYYY-MM-DD> [note]`"
+        )
+        return
+    try:
+        label = _normalise_season_split_label(split_label)
+        set_season_split_window(int(season_id), label, start_bris, end_bris, note=note)
+        season_label = f"{season_id}.0" if label == "0" else f"{season_id}.5"
+        await ctx.send(
+            f"Season {season_label} window set: {start_bris} -> {end_bris} (Brisbane time)."
+        )
+    except Exception as e:
+        await ctx.send(f"Failed to set season split window: {e}")
 
 
 @bot.command(name="season_windows")
@@ -9841,13 +9977,45 @@ async def leaderboard_image(ctx, mode: str = None):
             e = e.replace(tzinfo=timezone.utc)
         return s, e
 
+    def _get_season_split_windows_utc_from_db(season_any) -> dict[str, tuple[datetime, datetime]]:
+        season_id_int = _season_id_int_from_any(season_any)
+        try:
+            ensure_auto_import_tables()
+        except Exception:
+            pass
+
+        c.execute(
+            """
+            SELECT split_label, start_utc, end_utc
+            FROM mr_season_split_windows
+            WHERE season_id = ?
+            """,
+            (season_id_int,)
+        )
+
+        out: dict[str, tuple[datetime, datetime]] = {}
+        for split_label, start_utc, end_utc in c.fetchall():
+            if not start_utc or not end_utc:
+                continue
+            s = datetime.fromisoformat(str(start_utc))
+            e = datetime.fromisoformat(str(end_utc))
+            if s.tzinfo is None:
+                s = s.replace(tzinfo=timezone.utc)
+            if e.tzinfo is None:
+                e = e.replace(tzinfo=timezone.utc)
+            out[_normalise_season_split_label(split_label)] = (
+                s.astimezone(timezone.utc),
+                e.astimezone(timezone.utc),
+            )
+        return out
+
     def _match_time_map_for_season(season_id_int: int) -> dict[str, datetime]:
         """
         match_uid -> match_datetime_utc (timezone-aware)
 
-        MUST use the same timestamps used for season routing:
-          1) mr_match_meta.match_time_utc (persisted during auto-import)
-          2) fallback: extract from mr_match_json_raw via _extract_match_datetime_utc(payload)
+        Split leaderboards prefer the local import/upload time so manually
+        submitted matches land in the half they were submitted during. If an
+        import timestamp is missing, fall back to the match-play timestamp.
         """
         def _parse_iso_utc_local(s: str) -> datetime | None:
             if not s:
@@ -9862,13 +10030,13 @@ async def leaderboard_image(ctx, mode: str = None):
 
         out: dict[str, datetime] = {}
 
-        # 1) Preferred: persisted match_time_utc
+        # 1) Preferred for split views: local DB import/upload time.
         try:
             c.execute(
                 """
-                SELECT match_uid, match_time_utc
-                FROM mr_match_meta
-                WHERE season_id = ? AND match_time_utc IS NOT NULL
+                SELECT match_uid, imported_at
+                FROM match_imports
+                WHERE season_id = ? AND imported_at IS NOT NULL
                 """,
                 (season_id_int,)
             )
@@ -9879,7 +10047,27 @@ async def leaderboard_image(ctx, mode: str = None):
         except Exception:
             pass
 
-        # 2) Fallback: raw JSON extraction (match-details only; may be missing for some matches)
+        # 2) Fallback: persisted match-play timestamp.
+        try:
+            c.execute(
+                """
+                SELECT match_uid, match_time_utc
+                FROM mr_match_meta
+                WHERE season_id = ? AND match_time_utc IS NOT NULL
+                """,
+                (season_id_int,)
+            )
+            for mu, iso in c.fetchall():
+                mu = str(mu)
+                if mu in out:
+                    continue
+                dt = _parse_iso_utc_local(iso)
+                if dt:
+                    out[mu] = dt
+        except Exception:
+            pass
+
+        # 3) Fallback: raw JSON extraction (match-details only; may be missing for some matches)
         c.execute(
             "SELECT match_uid, json_text FROM mr_match_json_raw WHERE season_id = ?",
             (season_id_int,)
@@ -9920,7 +10108,8 @@ async def leaderboard_image(ctx, mode: str = None):
         (player, kills, deaths, assists, damage, damage_taken, healing, win, loss, mvp, svp)
         Filtered by match datetime within [start, end) or [start, end].
 
-        Uses mr_match_meta.match_time_utc (authoritative) via _match_time_map_for_season().
+        Uses import/upload time first via _match_time_map_for_season(), then
+        falls back to the stored match-play timestamp if needed.
         """
         match_times = _match_time_map_for_season(season_id_int)
         if not match_times:
@@ -9989,7 +10178,17 @@ async def leaderboard_image(ctx, mode: str = None):
     async def _make_main_leaderboard_buffer_halves() -> io.BytesIO | None:
         season_id_int = _season_id_int_from_any(season_id)
         s_start, s_end = _get_season_window_utc_from_db(season_id_int)
-        mid = s_start + (s_end - s_start) / 2
+        split_windows = _get_season_split_windows_utc_from_db(season_id_int)
+        if "0" in split_windows and "0.5" in split_windows:
+            h1_start, h1_end = split_windows["0"]
+            h2_start, h2_end = split_windows["0.5"]
+            mid = h1_end
+            using_custom_splits = True
+        else:
+            mid = s_start + (s_end - s_start) / 2
+            h1_start, h1_end = s_start, mid
+            h2_start, h2_end = mid, s_end
+            using_custom_splits = False
 
         # If there are literally no human rows for the season at all, keep the existing behaviour (return None)
         try:
@@ -10008,14 +10207,14 @@ async def leaderboard_image(ctx, mode: str = None):
             except Exception:
                 return d.strftime("%Y-%m-%d")
 
-        top_label = f"{season_id_int} — First Half ({_fmt_bris(s_start)} → {_fmt_bris(mid)})"
-        bot_label = f"{season_id_int} — Second Half ({_fmt_bris(mid)} → {_fmt_bris(s_end)})"
-
+        split_note = "custom" if using_custom_splits else "midpoint"
+        top_label = f"{season_id_int}.0 First Half ({_fmt_bris(h1_start)} -> {_fmt_bris(h1_end)}, {split_note} split)"
+        bot_label = f"{season_id_int}.5 Second Half ({_fmt_bris(h2_start)} -> {_fmt_bris(h2_end)}, {split_note} split)"
         rows_h1 = _fetch_human_rows_for_matchtime_range(
-            season_id_int, s_start, mid, end_inclusive=False
+            season_id_int, h1_start, h1_end, end_inclusive=using_custom_splits
         )
         rows_h2 = _fetch_human_rows_for_matchtime_range(
-            season_id_int, mid, s_end, end_inclusive=True
+            season_id_int, h2_start, h2_end, end_inclusive=True
         )
 
         img_top = _render_human_leaderboard_image_from_rows(rows_h1, top_label)
