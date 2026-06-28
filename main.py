@@ -23704,6 +23704,8 @@ async def helpme(ctx):
                  "Show configured Brisbane-time season windows used by auto-import routing."),
                 ("!season_window_set <season_id> <start> <end|OPEN> [note=...]",
                  "Set a Brisbane-time season window."),
+                ("!season_split_window_set <season_id> <0|0.5> <start> <end> [note]",
+                 "Set exact Brisbane-date windows for each leaderboard half. Alias: !season_half_window_set."),
             ],
         ),
         (
@@ -23724,8 +23726,8 @@ async def helpme(ctx):
             [
                 ("!run_all_stats",
                  "Create/update dedicated stats channels and post the latest stat outputs."),
-                ("!leaderboard_image [bots|both|main]",
-                 "Render leaderboard image(s)."),
+                ("!leaderboard_image [0.5|bots|both|main]",
+                 "Render leaderboard image(s), including the split 0/.5 season view."),
                 ("!session_overview [YYYY-MM-DD]",
                  "Session reporting images for a Brisbane date."),
                 ("!season_overviews",
