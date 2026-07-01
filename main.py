@@ -36,6 +36,12 @@ from itertools import combinations
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
+from rivalsmeta_adapter import (
+    RIVALSMETA_API_BASE,
+    is_rivalsmeta_match_url,
+    match_id_from_rivalsmeta_url,
+    normalise_rivalsmeta_match_payload,
+)
 
 # =========================
 # Global visual settings
@@ -1525,6 +1531,10 @@ def extract_match_id(url_or_id: str) -> str | None:
         return None
     s = url_or_id.strip()
 
+    rivalsmeta_match_id = match_id_from_rivalsmeta_url(s)
+    if rivalsmeta_match_id:
+        return rivalsmeta_match_id
+
     # If it's a URL, last path segment before ?
     if "://" in s:
         try:
@@ -1567,6 +1577,53 @@ async def mr_api_get_json(path: str) -> dict:
                 txt = await resp.text()
                 raise RuntimeError(f"HTTP {resp.status}: {txt[:300]}")
             return await resp.json()
+
+
+async def rivalsmeta_get_match_json(match_uid: str) -> dict:
+    """Fetch one public RivalsMeta match and translate it to Jarvis's payload shape."""
+    match_uid = str(match_uid or "").strip()
+    if not match_uid or len(match_uid) > 160 or not all(
+            ch.isdigit() or ch == "_" for ch in match_uid):
+        raise RuntimeError("Invalid RivalsMeta match id.")
+
+    url = f"{RIVALSMETA_API_BASE}/matches/{match_uid}"
+    headers = {"User-Agent": "Jarvis-Marvel-Rivals-Bot/1.0"}
+    timeout = aiohttp.ClientTimeout(total=25)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(url, headers=headers, allow_redirects=False) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise RuntimeError(f"RivalsMeta HTTP {resp.status}: {text[:200]}")
+            body = await resp.content.read(2_000_001)
+            if len(body) > 2_000_000:
+                raise RuntimeError("RivalsMeta response was unexpectedly large.")
+            try:
+                raw = json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise RuntimeError("RivalsMeta returned invalid JSON.") from exc
+
+    payload = normalise_rivalsmeta_match_payload(raw)
+    returned_uid = str(payload["match_details"].get("match_uid") or "")
+    if returned_uid != match_uid:
+        raise RuntimeError("RivalsMeta returned a different match id.")
+    return payload
+
+
+async def fetch_submit_match_payload(match_or_url: str,
+                                     match_uid: str) -> tuple[dict, str]:
+    """Use RivalsMeta for its URLs; otherwise fall back to it if the official API fails."""
+    if is_rivalsmeta_match_url(match_or_url):
+        return await rivalsmeta_get_match_json(match_uid), "RivalsMeta"
+
+    try:
+        return await mr_api_get_json(f"/api/v1/match/{match_uid}"), "MarvelRivalsAPI"
+    except Exception as official_error:
+        try:
+            return await rivalsmeta_get_match_json(match_uid), "RivalsMeta fallback"
+        except Exception as rivalsmeta_error:
+            raise RuntimeError(
+                f"Official API failed ({official_error}); RivalsMeta fallback failed ({rivalsmeta_error})."
+            ) from rivalsmeta_error
 
 
 # ------------------------------------------------------------------------------------------------------------
@@ -5252,7 +5309,7 @@ async def submit_match(ctx, match_or_url: str = None, game_label: str = None):
       !submit_match <match_id_or_url> Game_141
 
     Behaviour:
-      1) Fetches match payload from MarvelRivalsAPI
+      1) Fetches match payload from MarvelRivalsAPI or a supplied RivalsMeta URL
       2) Stores ALL match data (humans + bots) into mr_* tables (bots flagged)
       3) Inserts HUMAN-ONLY season stats into game_stats (for existing season commands)
       4) Updates streaks for humans
@@ -5367,7 +5424,8 @@ async def submit_match(ctx, match_or_url: str = None, game_label: str = None):
 
     # ---------- fetch payload ----------
     try:
-        payload = await mr_api_get_json(f"/api/v1/match/{match_uid}")
+        payload, import_source = await fetch_submit_match_payload(
+            match_or_url, match_uid)
     except Exception as e:
         await ctx.send(f"Failed to fetch match: {e}")
         return
@@ -5578,6 +5636,7 @@ async def submit_match(ctx, match_or_url: str = None, game_label: str = None):
     out.append(
         f"✅ Imported match `{match_uid}` → **Season {season_id}** / **{game_label}**"
     )
+    out.append(f"Source: **{import_source}**")
     out.append(f"Mode: **{mode_name}**" +
                (f" • Replay: `{replay_id}`" if replay_id else ""))
 
@@ -7910,14 +7969,14 @@ async def hero_synergy(ctx, mode: str = "humans",
         await ctx.send(file=discord.File(fp=buf, filename=f"hero_synergy_s{season_id}_{mode_n}{suffix}.png"))
 
 # ============================================================
-# COMMAND: edit_game (API-only)
+# COMMAND: edit_game (official API or RivalsMeta)
 # ============================================================
 
 
 @bot.command(name="edit_game")
 async def edit_game(ctx, game_label: str, new_match_or_url: str = None):
     """
-    API-only edit:
+    Match-source edit:
       - If new_match_or_url is provided: replaces the game label with that match
       - If omitted: re-imports the original match tied to that label (same match_uid)
 
@@ -7952,7 +8011,8 @@ async def edit_game(ctx, game_label: str, new_match_or_url: str = None):
     await ctx.send(f"Re-importing `{game_label}` using match `{match_uid}` …")
 
     try:
-        payload = await mr_api_get_json(f"/api/v1/match/{match_uid}")
+        payload, import_source = await fetch_submit_match_payload(
+            target, match_uid)
     except Exception as e:
         await ctx.send(f"Failed to fetch match: {e}")
         return
@@ -8084,7 +8144,7 @@ async def edit_game(ctx, game_label: str, new_match_or_url: str = None):
         return
 
     await ctx.send(
-        f"✅ Updated `{game_label}` (Season {season_id}) to match `{match_uid}`."
+        f"✅ Updated `{game_label}` (Season {season_id}) to match `{match_uid}` via {import_source}."
     )
 
 
@@ -23657,11 +23717,11 @@ async def helpme(ctx):
             "📥 Match Imports & Game Management (API)",
             [
                 ("!submit_match <match_id_or_url> [game_label]",
-                 "Import a single match from the Marvel Rivals API into the DB."),
+                 "Import one match from the official API or a RivalsMeta match URL."),
                 ("!browse_games",
                  "List recorded games for the current season, most recent first."),
                 ("!edit_game <game_label> [new_match_or_url]",
-                 "Re-import/replace a stored game label via API."),
+                 "Re-import/replace a stored game label via the official API or RivalsMeta."),
                 ("!undo_last_game",
                  "Delete the most recently imported game in the current season."),
                 ("!delete_game <game_label>",
