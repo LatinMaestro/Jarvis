@@ -41,6 +41,7 @@ from rivalsmeta_adapter import (
     is_rivalsmeta_match_url,
     match_id_from_rivalsmeta_url,
     normalise_rivalsmeta_match_payload,
+    read_limited_response_body,
 )
 
 # =========================
@@ -1594,13 +1595,14 @@ async def rivalsmeta_get_match_json(match_uid: str) -> dict:
             if resp.status != 200:
                 text = await resp.text()
                 raise RuntimeError(f"RivalsMeta HTTP {resp.status}: {text[:200]}")
-            body = await resp.content.read(2_000_001)
-            if len(body) > 2_000_000:
-                raise RuntimeError("RivalsMeta response was unexpectedly large.")
+            body = await read_limited_response_body(resp.content)
             try:
                 raw = json.loads(body.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise RuntimeError("RivalsMeta returned invalid JSON.") from exc
+                content_type = resp.headers.get("Content-Type", "unknown")
+                raise RuntimeError(
+                    f"RivalsMeta returned invalid JSON ({content_type}, {len(body)} bytes)."
+                ) from exc
 
     payload = normalise_rivalsmeta_match_payload(raw)
     returned_uid = str(payload["match_details"].get("match_uid") or "")
