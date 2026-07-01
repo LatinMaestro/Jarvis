@@ -193,7 +193,7 @@ def canonical_player_name(name: str) -> str:
 def run_db_migrations(default_season: int = 5):
     """
     Season support:
-    - Adds bot_settings + seasons
+    - Ensures bot_settings and seasons tables exist
     - Makes game_stats + streaks season-aware (PK includes season_id)
     - Creates season-filtered views game_stats_v and streaks_v (current season only)
     """
@@ -594,7 +594,7 @@ def _is_bot_player(obj: dict) -> bool:
     """
     Best-effort bot detection:
     - obj.is_bot True OR nick_name contains 'bot'
-    Matches your sample payload where nick_name == 'Bot'
+    Handles payloads where nick_name == 'Bot'.
     """
     if not isinstance(obj, dict):
         return False
@@ -1033,9 +1033,9 @@ def delete_game_everywhere(season_id: int, game_label: str):
 def upsert_match_into_mr_tables(*, season_id: int, game_label: str, payload: dict):
     """
     Stores ALL match data into mr_* tables (humans + bots; flagged),
-    while keeping your existing season tables HUMAN-ONLY (you will insert those in submit_match).
+    while keeping season tables human-only for submit_match.
 
-    Update:
+    Stores:
       - Stores player-level final_hits + solo_kill into mr_player_match (adds cols if missing)
       - Allocates final_hits + solo_kill across multiple heroes per match (kill-share, then time-share fallback)
       - Writes allocated values into mr_hero_segments.final_hits + mr_hero_segments.solo_kills (per hero segment)
@@ -1271,7 +1271,7 @@ def upsert_match_into_mr_tables(*, season_id: int, game_label: str, payload: dic
         # player-level FH/SK totals
         fh_total, sk_total = _player_fh_sk(p)
 
-        # mr_player_match (now includes final_hits + solo_kill)
+        # mr_player_match includes final_hits and solo_kill.
         c.execute(
             """
             INSERT INTO mr_player_match (
@@ -1838,7 +1838,7 @@ async def refresh_hero_cache(force: bool = False) -> int:
 
         hid_raw = _safe_str(h.get("id"))
         name = _safe_str(h.get("name"))
-        role = _safe_str(h.get("role"))  # <-- NEW (Vanguard/Duelist/Strategist)
+        role = _safe_str(h.get("role"))  # Vanguard, Duelist or Strategist
 
         if not hid_raw or not name:
             continue
@@ -1941,9 +1941,9 @@ def _load_hero_name_map() -> dict[str, str]:
     return m
 
 # ==========================================================================================
-# HERO SEGMENT D/H/T FIX
-# - Adds per-hero damage/heal/taken columns to mr_hero_segments
-# - Updates can be backfilled from mr_match_json_raw (if API provides per-hero fields)
+# HERO SEGMENT DAMAGE / HEALING / DAMAGE-TAKEN SUPPORT
+# - Ensures per-hero damage/heal/taken columns exist in mr_hero_segments
+# - Supports backfilling from mr_match_json_raw when the API provides per-hero fields
 # ==========================================================================================
 
 def _mr_has_column(table: str, column: str) -> bool:
@@ -2209,7 +2209,7 @@ API_BASE = "https://marvelrivalsapi.com"
 # -------------------------
 # CONFIG (tune these)
 # -------------------------
-# Background auto-import is intentionally disabled. The bot now imports only when
+# Background auto-import is intentionally disabled. The bot imports only when
 # !auto_import_run is manually triggered after a session.
 AUTO_IMPORT_ENABLED_DEFAULT = False
 AUTO_IMPORT_INTERVAL_SECONDS = int(
@@ -2218,7 +2218,7 @@ AUTO_IMPORT_INTERVAL_SECONDS = int(
 # Import all game types (ranked/quickplay/custom/etc.)
 AUTO_IMPORT_REQUIRE_CUSTOM = False
 CUSTOM_MODE_KEYWORDS = ["custom"
-                        ]  # add more if your API returns something else
+                        ]  # additional custom-mode keywords may be added here
 ALLOWED_GAME_MODE_IDS = set()  # optional numeric IDs if you learn them later
 
 # Discovery breadth
@@ -2735,9 +2735,6 @@ async def _api_get_json(path: str, session: "aiohttp.ClientSession"):
         return await resp.json()
 
 
-# IMPORTANT: update this function too (drop-in replacement) so probe can pass season/game_mode:
-
-
 async def _fetch_match_history_for_player(query: str,
                                           session: "aiohttp.ClientSession",
                                           skip: int = 0,
@@ -3190,7 +3187,7 @@ async def _import_match_into_season(
     # Store API-native match payload (includes bots)
     upsert_match_into_mr_tables(season_id=season_id, game_label=game_label, payload=payload)
 
-    # Store human-only season stats (what your leaderboards use)
+    # Store human-only season stats used by leaderboards.
     if "write_season_rows_from_match_payload" not in globals():
         raise RuntimeError("Missing helper: write_season_rows_from_match_payload(...)")
 
@@ -3313,7 +3310,7 @@ def _get_auto_import_api_seasons() -> list[str]:
     except Exception:
         sid = 7
 
-    # Marvel Rivals API separates x and x.5, while your bot season stores both under the same season id.
+    # Marvel Rivals API separates x and x.5; Jarvis stores both under one season id.
     return [f"{sid}.5", str(sid)]
 
 
@@ -3351,7 +3348,7 @@ def _parse_auto_import_run_args(args) -> dict:
 
 AUTO_IMPORT_RUN_LOCK = asyncio.Lock()
 
-# API seasons newest → oldest. Adjust if the API adds more.
+# API seasons ordered newest to oldest.
 API_SEASON_ORDER = [
     "8.5", "8", "7.5", "7", "6.5", "6", "5.5", "5", "4.5", "4", "3.5", "3", "2.5", "2", "1.5", "1", "0.5", "0"
 ]
@@ -3705,7 +3702,7 @@ async def _start_status_ticker(
 ):
     """
     Starts a 15s ticker that edits ONE Discord message with current phase + elapsed time.
-    phase_ref: mutable dict {"phase": "...", "detail": "..."} updated by your code.
+    phase_ref: mutable dict {"phase": "...", "detail": "..."} updated by the caller.
     Returns: (stop_event, ticker_task, status_message)
     """
     start_ts = time.time()
@@ -3763,8 +3760,8 @@ async def _stop_status_ticker(stop_event, task, status_msg, final_text: str = No
                 pass
 
 # -------------------------
-# Background loop removed
-# -------------------------
+# Manual-only auto-import
+# -----------------------
 # Auto-import no longer runs every 120 seconds. Use !auto_import_run after a
 # session. This avoids unnecessary history scans and API rate-limit pressure.
 
@@ -3773,7 +3770,6 @@ async def _stop_status_ticker(stop_event, task, status_msg, final_text: str = No
 # ============================================================================================================
 # Shared helper: payload -> (human-only) game_stats rows
 # Used by submit_match AND auto-import.
-# Add this helper above @bot.command(name="submit_match")
 # ============================================================================================================
 # ============================================================================================================
 
@@ -3790,7 +3786,7 @@ def _is_bot_player(p: dict) -> bool:
     if p.get("is_bot") is True:
         return True
 
-    # Name-based fallback (matches your payloads: nick_name == "Bot")
+    # Name-based fallback for payloads where nick_name == "Bot".
     for k in ("nick_name", "nickname", "player_name", "player", "name"):
         v = p.get(k)
         if isinstance(v, str) and v.strip().lower() == "bot":
@@ -3807,7 +3803,7 @@ def write_season_rows_from_match_payload(season_id: int,
                                          update_streaks_flag: bool = True):
     """
     Writes HUMAN-ONLY rows into game_stats for leaderboard + existing season commands.
-    Mirrors the same fields your submit_match uses.
+    Mirrors the fields used by submit_match.
     """
     ensure_mr_api_tables()
 
@@ -3876,8 +3872,7 @@ def write_season_rows_from_match_payload(season_id: int,
     if not human_rows:
         raise RuntimeError("No human players found in payload.")
 
-    # Dedupe display names inside this match (your existing behaviour)
-    # Reuse your submit_match logic if you keep it; else minimal safe approach:
+    # Dedupe display names inside this match.
     name_counts = {}
     for r, raw in human_rows:
         name_counts[r["player"]] = name_counts.get(r["player"], 0) + 1
@@ -3911,7 +3906,7 @@ def write_season_rows_from_match_payload(season_id: int,
             r["svp"] = 0
         human_rows[_pick_best(human_rows, False)][0]["svp"] = 1
 
-    # Insert rows (your schema)
+    # Insert season rows.
     for (r, _raw) in human_rows:
         c.execute(
             """
@@ -4027,7 +4022,7 @@ def _season_date_range(season_id: int):
 
 def _ensure_season_exists_api(season_id: int):
     """
-    Keeps your seasons metadata table in sync with API-era usage.
+    Keeps the seasons metadata table in sync with API-era usage.
     """
     ensure_seasons_table()
     c.execute("INSERT OR IGNORE INTO seasons(season_id) VALUES(?)",
@@ -4044,8 +4039,7 @@ async def season(ctx):
 
 
 # ======================================================================
-# PATCH B: Clear session + fairness caches when switching seasons
-#          (so next_teams starts fresh for the new season)
+# Clear session and fairness caches when switching seasons so next_teams starts fresh.
 # ======================================================================
 
 try:
@@ -4281,7 +4275,7 @@ except Exception:
 
 @bot.command(name="refresh_heroes", aliases=["refresh_heros", "refresh_hero_cache", "refreshheroes"])
 async def refresh_heroes_cmd(ctx):
-    # Admin guard (matches your existing pattern)
+    # Restrict cache refresh to the bot owner or server administrators.
 
     # Ensure tables exist
     try:
@@ -4568,7 +4562,7 @@ async def hero_role_set(ctx, hero_id: str = None, role: str = None, *, hero_name
         await ctx.send("Invalid hero_id.")
         return
 
-    # Keep your existing behaviour: store raw + digits-only alias if applicable
+    # Store the raw hero id and a digits-only alias when applicable.
     ids_to_store = [hid_raw]
     hid_digits = _digits_only(hid_raw)
     if hid_digits and hid_digits != hid_raw:
@@ -5092,7 +5086,7 @@ async def auto_import_debug(ctx, player_uid: str = None):
                 )
                 continue
 
-            # Gate: custom-only (if still enabled in your config)
+            # Apply the custom-match gate when enabled in configuration.
             try:
                 if not _is_custom_match(payload):
                     results.append(
@@ -5145,8 +5139,8 @@ async def match_history_probe(ctx,
       !match_history_probe 96894221 6 20 5.5 3
 
     Notes:
-      - Adds robust RATE_LIMIT_429 handling (backoff + retry).
-      - Adds small pacing delay between successful page fetches to reduce 429s.
+      - Uses RATE_LIMIT_429 backoff and retry handling.
+      - Uses a small pacing delay between successful page fetches.
       - Supports optional season and game_mode query params (v1 endpoint).
     """
     if aiohttp is None:
@@ -5199,9 +5193,7 @@ async def match_history_probe(ctx,
 
         for _attempt in range(attempts):
             try:
-                # Prefer your existing function signature; extend it if you already did.
-                # If your _fetch_match_history_for_player does NOT accept season/game_mode yet,
-                # update it per the note below.
+                # Pass season and game mode through to the history endpoint.
                 return await _fetch_match_history_for_player(q,
                                                              session,
                                                              skip=skip,
@@ -7304,15 +7296,10 @@ async def top3_stack(ctx, *, player_names: Optional[str] = None):
 
 # ============================================================================================================
 # ============================================================================================================
-# HERO TIERLIST + HERO SYNERGY — IMAGE OUTPUT (styled like player_heros)
+# HERO TIERLIST + HERO SYNERGY — IMAGE OUTPUT
 #
-# Fixes:
 #   - Does NOT reference mr_hero_segments.is_bot (filters via mr_player_match.is_bot)
 #   - Produces PNG cards using the same look/feel as player_heros (fonts via get_fonts()).
-#
-# Drop-in instructions:
-#   1) Delete/replace any previous hero_tierlist / hero_synergy blocks you added earlier.
-#   2) Paste this whole block anywhere AFTER: get_fonts(), _fmt_time(), get_hero_name(), ensure_mr_api_tables()
 # ============================================================================================================
 # ============================================================================================================
 
@@ -7321,7 +7308,7 @@ import math
 from collections import defaultdict
 from itertools import combinations
 
-# Reuse your existing thresholds if present; else set safe defaults
+# Use configured eligibility thresholds when available, otherwise safe defaults.
 try:
     HERO_WIN_MIN_SECONDS
 except NameError:
@@ -8409,13 +8396,13 @@ async def mr_cleanup_orphans(ctx):
 # ============================================================================================================
 # ============================================================================================================
 # Session Overview (API-native, 2 images)
-# Assumes existing helpers already are above: (check)
+# Dependencies:
 #  - ensure_mr_api_tables()
 #  - get_current_season_id()
 #  - get_fonts()
 #  - _fmt_time(seconds:int)->str
 #  - get_hero_name(hero_id:str)->awaitable[str]
-# - Doesnt read manual entry - API only version working
+# Uses imported API-format match data.
 # ============================================================================================================
 # ============================================================================================================
 
@@ -8648,7 +8635,7 @@ def _aggregate_session_records_api(
     """
     Session table (humans only) with richer columns:
     Player | W/L | Win% | AvgKDA | AvgDmg | AvgHeal | AvgTaken | TopHeroSess | MVP | SVP | Badges
-    (Season comparison added later in command after we compute baselines.)
+    Season comparison is applied after baselines are computed.
     """
     if not session_labels:
         return pandas.DataFrame()
@@ -9032,7 +9019,7 @@ async def _session_top_bans_and_picks(season_id: int,
 
 
 # ============================================================================================================
-# NEW: Session Overview — Role Distribution (triangle panel replacing the H2H mini-table)
+# Session Overview — Role Distribution
 # - Uses mr_hero_segments seconds (humans only) and hero_cache.hero_role mapping.
 # - Draws a ternary triangle (Vanguard/Duelist/Strategist shares) into the same right-side panel area.
 # ============================================================================================================
@@ -9319,8 +9306,8 @@ def _so_draw_role_triangle_panel(draw, x0: int, y0: int, w: int, h: int,
 
 
 # ------------------------------------------------------------------------------------------------------------
-# UPDATED: replace your existing _render_session_overview_image_api with this version
-# (Only change: replace the right-side H2H panel with the Role Distribution triangle panel.)
+# Session overview image renderer
+# The right-side panel displays the Role Distribution triangle.
 # ------------------------------------------------------------------------------------------------------------
 def _render_session_overview_image_api(session_date, session_labels, session_df, standings_df_after):
     body_font, title_font = get_fonts()
@@ -10003,19 +9990,18 @@ async def leaderboard_image(ctx, mode: str = None):
     from datetime import datetime, timezone
 
     def _season_id_int_from_any(season_any) -> int:
-        # Your seasons are integer seasons (4,5,6). If someone passes "5.5", treat as 5.
+        # Season ids are integers; treat a value such as "5.5" as season 5.
         return int(str(season_any).strip().split(".", 1)[0])
 
     def _get_season_window_utc_from_db(season_any) -> tuple[datetime, datetime]:
         # Uses mr_season_windows (UTC ISO strings)
         season_id_int = _season_id_int_from_any(season_any)
 
-        # Important: season windows live under the auto-import tables in your project
-        # (safe even if already created)
+        # Season windows are created with the auto-import tables.
         try:
             ensure_auto_import_tables()
         except Exception:
-            # If your project uses a different ensure fn name, remove this try/except
+            # Continue when the tables have already been initialized elsewhere.
             pass
 
         c.execute(
@@ -10351,7 +10337,7 @@ async def leaderboard_image(ctx, mode: str = None):
 
     def _render_human_leaderboard_image_from_rows(rows: list[tuple], season_label: str) -> Image.Image | None:
         """
-        Builds the same styled leaderboard as your current humans image, but for an explicit season.
+        Builds the styled human leaderboard for an explicit season.
         Returns a PIL Image (not a buffer) so we can stitch two halves easily.
         """
         MIN_GAMES_MAIN = 30
@@ -11779,7 +11765,6 @@ async def win_matrix(ctx):
 
 # ============================================================================================================
 # COMMAND: 2v2_records — Everyone’s W/L when ONLY 4 HUMANS were present (2 humans per team), bots allowed
-#   Output style updated to match other image-table commands (e.g., !low_team).
 #
 #   Eligible match =
 #     - exactly 4 human players total
@@ -11950,7 +11935,7 @@ def create_2v2_records_image(results, title="2v2 (Humans) Records"):
     def _tw(s) -> float:
         return td.textlength(str(s), font=body_font)
 
-    # Tuned to match your other image-table styles
+    # Tuned to match the other image-table styles.
     mins = [280, 120, 90, 90, 130, 140]
     maxs = [560, 160, 110, 110, 160, 180]
 
@@ -12136,14 +12121,14 @@ async def four_v_four_records(ctx):
 # Includes:
 #   - Snapshot (no percentile bars; just values + percentile text)
 #   - Role mix (time share) + Signature heroes (by PERFORMANCE: win% with >=5 games)
-#   - Win/Avoid lists based on TEAMMATE HEROES (not players, not your own heroes)
+#   - Win/Avoid lists based on teammate heroes rather than players or the selected player's heroes
 #   - Chemistry (no Δpp deltas)
 #   - Momentum (no deltas) + Enemy ban pressure
 #
 # Requires tables:
 #   mr_player_match, mr_hero_segments, mr_ban_picks, match_imports
 #
-# Uses existing helpers already in your file:
+# Uses these shared helpers:
 #   ensure_mr_api_tables, get_current_season_id, get_fonts, norm_key, canonical_player_name,
 #   get_hero_name, refresh_hero_cache, _fmt_time, _digits_only
 # ============================================================================================================
@@ -14179,25 +14164,25 @@ async def role_winrates(ctx, *, arg: Optional[str] = None):
     )
 
 # ============================================================================================================
-# DROP-IN: Head-to-Head Matchup Command (UI picker + sports-style matchup card)
+# Head-to-Head Matchup Command (UI picker + sports-style matchup card)
 #
 # Command: !h2h  (aliases: !head2head, !head_to_head)
 #
 # DEFAULT (no hero selected on either side):
 #   - TRUE HEAD-TO-HEAD ONLY: stats calculated ONLY from matches where both selected players are OPPONENTS.
 #
-# HERO COMPARISONS (UPDATED):
+# HERO COMPARISONS:
 #   - Two independent hero dropdowns (one under each player):
 #       * Each dropdown lists ONLY heroes that player has eligibly played
 #       * Allows cross-hero comparisons (Hero A vs Hero B)
 #       * If a side hero is left as "Overall", that side uses opponent-only H2H stats
 #   - Hero comparison table includes:
 #       * Win %, Games, Avg KDA, K/D/A per game, Time, Time per game, Accuracy
-#       * Damage / game, Healing / game, Damage Taken / game  (NEW)
+#       * Damage / game, Healing / game, Damage Taken / game
 #     Note: hero damage/heal/taken are summed from mr_player_match across matches where the hero is eligible
-#           (i.e., matches where the player was primarily on that hero by your eligibility thresholds).
+#           (i.e., matches where the player was primarily on that hero by the eligibility thresholds).
 #
-# Layout fixes included:
+# Layout:
 #   - Table pushed down to avoid header overlap
 #   - Footer wraps within each column (no cross-over)
 #
@@ -14878,17 +14863,13 @@ def _h2h_get_player_eligible_heroes(season_id: int, player_uid: int, limit: int 
 
 
 # ============================================================================================================
-# DROP-IN: H2H Hero Compare — add Final Hits / G + Solo Kills / G (allocated per hero; supports multi-hero matches)
+# H2H Hero Compare — Final Hits / G + Solo Kills / G (allocated per hero; supports multi-hero matches)
 #
 # Why allocation is required:
 #   The match API returns final_hits + solo_kill at the player-match level, not per-hero segment.
 #   The per-hero list (player_heroes) can contain multiple heroes, so we allocate totals across heroes
 #   by KILL share (preferred) then TIME share.
 #
-# Install:
-#   1) Paste the HELPERS anywhere above _h2h_get_hero_totals_eligible
-#   2) Replace your existing _h2h_get_hero_totals_eligible with the version below
-#   3) Replace your existing _h2h_build_player_pack with the version below
 # ============================================================================================================
 
 import json
@@ -15197,7 +15178,7 @@ def _h2h_get_hero_totals_eligible(
 
 
 # -----------------------------
-# Player pack builder (updated: adds hero_avg_final_hits + hero_avg_solo_kills)
+# Player pack builder
 # -----------------------------
 async def _h2h_build_player_pack(
     season_id: int,
@@ -15287,7 +15268,7 @@ async def _h2h_build_player_pack(
     hero_accuracy = None
     hero_avg_dmg = hero_avg_heal = hero_avg_taken = 0.0
 
-    # NEW
+    # Optional per-hero final-hit and solo-kill averages.
     hero_avg_final_hits = 0.0
     hero_avg_solo_kills = 0.0
 
@@ -15320,7 +15301,7 @@ async def _h2h_build_player_pack(
         den = _h2h_safe_float(ht.get("acc_den", 0.0), 0.0)
         hero_accuracy = (_h2h_safe_float(ht.get("acc_num", 0.0), 0.0) / den) if den > 0 else None
 
-        # NEW: Final Hits / G, Solo Kills / G
+        # Final Hits / G and Solo Kills / G.
         fh = _h2h_safe_float(ht.get("final_hits", 0.0), 0.0)
         sk = _h2h_safe_float(ht.get("solo_kills", 0.0), 0.0)
         hero_avg_final_hits = (fh / hero_games) if hero_games > 0 else 0.0
@@ -15381,7 +15362,7 @@ async def _h2h_build_player_pack(
         "hero_avg_taken": float(hero_avg_taken),
         "hero_accuracy": (float(hero_accuracy) if hero_accuracy is not None else None),
 
-        # NEW
+        # Per-hero finishing averages.
         "hero_avg_final_hits": float(hero_avg_final_hits),
         "hero_avg_solo_kills": float(hero_avg_solo_kills),
     }
@@ -16095,8 +16076,8 @@ def create_low_team_image_with_percent(results,
                                        title="Low-Team % (Uneven Games Only)"):
     """
     results: list of tuples:
-      - legacy: (player_name, on_less, uneven_total, pct_on_less, winpct_on_less)
-      - new:    (player_name, on_less, uneven_total, pct_on_less, winpct_on_less, loss_pct_on_more)
+      - 5-field form: (player_name, on_less, uneven_total, pct_on_less, winpct_on_less)
+      - 6-field form: (player_name, on_less, uneven_total, pct_on_less, winpct_on_less, loss_pct_on_more)
                where loss_pct_on_more may be None if never on the larger team.
 
     Returns: BytesIO PNG buffer
@@ -16114,7 +16095,7 @@ def create_low_team_image_with_percent(results,
     # Defensive: ensure something to render
     rows = []
     for item in (results or []):
-        # Support both legacy (5-tuple) and new (6-tuple)
+        # Support both the 5-field and 6-field tuple forms.
         name = item[0] if len(item) > 0 else "—"
         on_less = item[1] if len(item) > 1 else 0
         uneven = item[2] if len(item) > 2 else 0
@@ -16148,7 +16129,7 @@ def create_low_team_image_with_percent(results,
     def _tw(s) -> float:
         return td.textlength(str(s), font=body_font)
 
-    # Column min/max widths (tuned to match your other tables)
+    # Column min/max widths tuned to match the other tables.
     mins = [260, 120, 120, 160, 180, 200]
     maxs = [520, 180, 180, 220, 240, 260]
 
@@ -16207,7 +16188,7 @@ async def low_team(ctx):
         # Strong normalisation (spaces/underscores/punctuation/case)
         return re.sub(r"[^a-z0-9]+", "", (name or "").lower())
 
-    # game_stats_v is already season-filtered by your set season logic
+    # game_stats_v is already filtered by the active season.
     c.execute("SELECT game_label, player, win FROM game_stats_v")
     rows = c.fetchall()
 
@@ -16268,7 +16249,7 @@ async def low_team(ctx):
             if smaller_won:
                 low_team_win_counts[p] += 1
 
-        # larger team stats (new)
+        # Larger-team statistics.
         for p in larger:
             on_more_counts[p] += 1
             if larger_lost:
@@ -17042,7 +17023,7 @@ def _ss_compute_core(season_id: int) -> dict | None:
         players who appear in the current season, so early-season upsets are not distorted by
         fresh 50/50 starts.
 
-    Controls (set these globals near your UPSET_* tunables):
+    Controls use the UPSET_* tuning globals:
       UPSET_SEED_FROM_PRIOR_SEASONS = True/False
       UPSET_PRIOR_SEASONS_BACK = int | None   # e.g. 3 for last 3 seasons, None for all prior seasons
     """
@@ -17275,7 +17256,7 @@ def _ss_compute_core(season_id: int) -> dict | None:
         base0 = sum(pre_pct(u) for u in team0) / max(1, len(team0))
         base1 = sum(pre_pct(u) for u in team1) / max(1, len(team1))
 
-        # apply uneven-team penalty (same as your current logic)
+        # Apply the standard uneven-team penalty.
         n0, n1 = len(team0), len(team1)
         penalty = min(UPSET_SIZE_PENALTY_CAP, UPSET_SIZE_PENALTY_PER_PLAYER * abs(n0 - n1))
         adj0, adj1 = base0, base1
@@ -18084,7 +18065,7 @@ async def role_distribution(ctx):
 
 
 # ============================================================================================================
-# DROP-IN: !season_movie_pack (Enriched "movie pack" with beats, rivalries, arcs, meta, chemistry, finale)
+# !season_movie_pack — enriched movie pack with beats, rivalries, arcs, meta, chemistry and finale
 #
 # Usage:
 #   !season_movie_pack
@@ -18093,10 +18074,9 @@ async def role_distribution(ctx):
 # Output:
 #   Uploads: season_movie_pack_s<season_id>.md
 #
-# Notes:
-# - Paste-proof: avoids triple-quoted strings to prevent swallowing code below.
-# - Relies on existing helpers when available, otherwise degrades gracefully.
-# - Hard requirements you already have:
+# Dependencies:
+# - Uses shared helpers when available and otherwise degrades gracefully.
+# - Required:
 #     bot, discord, ensure_mr_api_tables(), get_current_season_id(), _ss_compute_core()
 # - Optional helpers used if present:
 #     get_hero_name() async, _get_games_grouped_by_date_api(), _aggregate_session_records_api(),
@@ -18890,10 +18870,10 @@ async def season_movie_pack(ctx, season_id: int = None):
 # ============================================================================================================
 # !run_all_stats — creates/updates dedicated Discord channels with the latest outputs for key stat commands
 #
-# Updates included:
-# - leaderboard_image now posts EXACTLY 3 images: main, 0.5, bots (no duplicates)
-# - added: hero_time, 2v2_records, profile, season_movie_pack
-# - profile UPDATED to run for ALL human players (avoids dropdown default)
+# Included behavior:
+# - leaderboard_image posts exactly three images: main, 0.5 and bots
+# - Includes hero_time, 2v2_records, profile and season_movie_pack
+# - Runs profile for all human players rather than the dropdown default
 # - For multi-option commands:
 #     * player_heros: posts "all" + each player output in the season
 #     * hero_tierlist: posts humans, bots, both
@@ -19114,7 +19094,7 @@ async def run_all_stats(ctx: commands.Context):
                         await asyncio.sleep(0.7)
 
         elif cmd_name == "profile":
-            # New profile defaults to a dropdown if called with no args,
+            # profile defaults to a dropdown if called with no args,
             # so we run one profile image per human player in the current season.
             try:
                 season_id = get_current_season_id()
@@ -19155,17 +19135,17 @@ async def run_all_stats(ctx: commands.Context):
     await ctx.send(f"✅ Stats refresh complete for **{category.name}**.")
 
 # ============================================================================================================
-# !pregame — COMPLETE OVERRIDE (helpers + command)
-#   UPDATED AGAIN: "SWINGY / BUZZ" MODE
+# !pregame — helpers and command
+#   "SWINGY / BUZZ" MODE
 #     - Much more swingy session predictions (dominators + disasters)
 #     - Heavier weighting on teammate synergy + win_matrix style pairing success
 #     - Explicit "meltdown / pop-off" night shocks (so someone can throw a night)
 #     - More upsets (noise + lower Beta concentration + steeper logistic)
 #
-# CHANGES (per request):
+# Configuration:
 #   - sims reduced: default sims=3 (and determinations image calls sims=3)
-#   - predicted leaderboard % shown now matches the displayed ~W-L (NOT the mean % across sims)
-#   - targets: keep session-average games, but add +2 games to EVERYONE’s target (still clamped 3..12)
+#   - predicted leaderboard % matches the displayed ~W-L rather than the mean across simulations
+#   - targets use session-average games plus two, clamped to 3..12
 #
 # Outputs (selected players only):
 #   1) Low-Team % table image (ROWS filtered only; full-season stats preserved; NO game filtering)
@@ -20532,7 +20512,7 @@ def _pregame_predict_team_a_win_prob(team_a: set[str],
 
 # ------------------------------------------------------------------------------------------------------------
 # Predicted session leaderboard — SWINGY MODE
-#   UPDATE:
+#   Behavior:
 #     - ORDER by predicted win-rate (based on displayed rounded ~W-L so the % and ordering are consistent)
 #     - Predicted leaderboard changes: ranks are computed from CURRENT season W/L (same source as leaderboard_image)
 #       plus the predicted (rounded) W/L, then shows position movement.
@@ -20692,7 +20672,7 @@ def _pregame_compute_predicted_session_leaderboard(
 
         # DISPLAYED W-L (rounded) drives BOTH:
         #   - displayed % (must match W-L)
-        #   - ordering (per request: order by win rate predicted)
+        #   - ordering by predicted win rate
         w_i = max(0, int(round(ew)))
         l_i = max(0, int(round(el)))
         g_i = w_i + l_i
@@ -21204,7 +21184,7 @@ def _nt_apply_session_virtual_overlay(*, active_set: set[str], session_games: li
     Session carry-over:
       - For each committed session game, for each player with a stored restricted role:
           add virtual time equally split across the TWO allowed roles
-      - This makes next roll restrictions reflect season DB + prior session restrictions (like your matchup carry-over)
+      - This makes next-roll restrictions reflect the season DB and prior session restrictions.
     """
     if not session_games:
         return
@@ -21372,8 +21352,8 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
 
     Notes:
       - No skill balancing is used for team selection.
-      - A predicted win chance line (display-only) may appear if your file includes
-        the skill model; it does not affect team selection.
+      - A predicted win chance line may appear when the skill model is available;
+        it does not affect team selection.
     """
 
     # =====================================================================================
@@ -21456,13 +21436,13 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
     LOWTEAM_DEFICIT_REWARD = 520.0
     LOWTEAM_OVER_PENALTY = 520.0
 
-    # Existing post-game spread controls
+    # Post-game spread controls.
     LOWTEAM_SPREAD_WEIGHT = 380.0
     LOWTEAM_L1_WEIGHT = 320.0
     LOWTEAM_SPREAD_POW = 3.8
     LOWTEAM_L1_POW = 3.2
 
-    # NEW: aggressively minimise the post-game low-team gap profile
+    # Aggressively minimise the post-game low-team gap profile.
     LOWTEAM_POST_ABS_WEIGHT = 560.0
     LOWTEAM_POST_MAX_WEIGHT = 980.0
     LOWTEAM_POST_UNDER_WEIGHT = 880.0
@@ -21473,7 +21453,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
     LOWTEAM_POST_UNDER_POW = 1.7
     LOWTEAM_POST_OVER_POW = 1.5
 
-    # NEW: priority pool for the most under-served low-team players
+    # Priority pool for the most under-served low-team players.
     LOWTEAM_PRIORITY_BUFFER = 1
     LOWTEAM_PRIORITY_MISS_WEIGHT = 1800.0
     LOWTEAM_PRIORITY_WINDOW_MISS_WEIGHT = 900.0
@@ -21590,7 +21570,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
     eligible_low = [p for p in active if p not in protected_low]
 
     # =====================================================================================
-    # NEW: low-team priority ranking
+    # Low-team priority ranking.
     # The most under-target players should be pulled back toward target quickly.
     # =====================================================================================
     current_low_deficit = {}
@@ -21842,9 +21822,8 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
                 for a, b in combinations(t, 2):
                     pair_together[_pair_key(a, b)] += 1
 
-    # IMPORTANT FIX:
-    # Fold committed session games into pair_seen/pair_together AND into streak ordering
-    # so the very next roll sees the updated band position.
+    # Fold committed session games into pair_seen, pair_together and streak ordering
+    # so the next roll sees the current band position.
     sess_recs = []
     for si, g in enumerate(session.session_games or []):
         ta = set(g.get("team_a") or []) & active_set
@@ -22086,7 +22065,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
                 extra += LOWTEAM_SPREAD_WEIGHT * (spread ** LOWTEAM_SPREAD_POW)
                 extra += LOWTEAM_L1_WEIGHT * (l1avg ** LOWTEAM_L1_POW)
 
-                # NEW: evaluate the whole lobby AFTER this candidate low-team assignment
+                # Evaluate the whole lobby after this candidate low-team assignment.
                 low_post_abs, low_post_max, low_post_under, low_post_over, _post_ratios = _postgame_low_profile(low_team)
 
                 extra += LOWTEAM_POST_ABS_WEIGHT * (low_post_abs ** LOWTEAM_POST_ABS_POW)
@@ -22106,7 +22085,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
                 low_bias -= LOWTEAM_DEFICIT_REWARD * deficit_reward
                 low_bias += LOWTEAM_OVER_PENALTY * over_pick_pen
 
-                # NEW: if the proposed low team misses the most under-served players, punish it hard
+                # Strongly penalise missing the most under-served players.
                 if strict_priority_low:
                     missed_strict = sum(1 for p in strict_priority_low if p not in low_team)
                     if missed_strict > 0:
@@ -22316,7 +22295,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
 # API identity helpers
 # -------------------------
 def _pkey_from_uid(uid: int) -> str:
-    """Stable string key for a player_uid (keeps your engine dict[str,*] structure)."""
+    """Stable string key for a player_uid used by engine dict[str, *] structures."""
     return f"u{int(uid)}"
 
 
@@ -22331,7 +22310,7 @@ def _uid_from_pkey(pkey: str) -> int | None:
 
 def _get_all_players() -> dict[str, str]:
     """
-    Replaces your old _get_all_players() that used manual tables.
+    Returns the season-aware player pool used by fairness commands.
 
     Returns:
       { player_key(str) : display_name(str) }
@@ -22450,7 +22429,7 @@ def _build_fairness_context() -> FairnessContext:
             for p in low:
                 low_team_games[p] += 1
 
-            # NEW: season-only low-team teammate pair history
+            # Season-only low-team teammate pair history.
             for a, b in combinations(sorted(low), 2):
                 key = (a, b) if a < b else (b, a)
                 low_team_pair_games[key] += 1
@@ -22573,7 +22552,7 @@ class ActivePlayersView(discord.ui.View):
     Multi-select UI to toggle active players for this session.
     When on_done is provided, it will be called after selection is saved.
 
-    New:
+    Options:
       - persist=False -> do NOT write to SESSION_STATES / DB (useful for previews like !pregame)
       - placeholder / confirm_label -> customise the UI text
     """
@@ -22616,7 +22595,7 @@ class ActivePlayersView(discord.ui.View):
         selected = set(self.children[0].values) if self.children else set()
         self.session_state.active_players = selected
 
-        # Persist only when requested (default behaviour unchanged for session_* / next_teams flows)
+        # Persist when requested; session and next_teams flows enable persistence by default.
         if self.persist:
             try:
                 key = (int(interaction.guild_id), int(interaction.channel_id))
@@ -22939,7 +22918,7 @@ def _commit_pending_roll(session: SessionState,
         "restricted_roles": restricted_roles,
     })
 
-    # Update low-team counts used by your fairness engine
+    # Update low-team counts used by the fairness engine.
     if low_team:
         for p in low_team:
             session.session_low_team_counts[p] += 1
@@ -23039,7 +23018,7 @@ def _serialize_session(session: SessionState) -> dict:
         "last_split": session.last_split,
         "last_debug": session.last_debug,
 
-        # pending roll (CRITICAL for your requested behaviour)
+        # Pending roll state required across interactions.
         "pending_roll_token": session.pending_roll_token,
         "pending_roll_data": session.pending_roll_data,
         "pending_roll_message_id": session.pending_roll_message_id,
@@ -23063,7 +23042,7 @@ def _build_session_pair_stats(session: SessionState):
       - games_session_player[p]
       - pair_pct_session[(a,b)]
       - avg_pair_pct_session_by_player[p]
-    Based only on games in this session (your pending/commit model).
+    Based only on committed games in this session.
     """
     pair_games = defaultdict(int)
     games_played = defaultdict(int)
@@ -23107,8 +23086,7 @@ def _compute_fairness_score(
     This remains season-focused. Committed session games are treated as additional
     season games so the score evolves immediately as you record games.
 
-    NEW:
-    - low-team teammate mix fairness is season-only
+    Low-team teammate mix fairness is season-only:
     - it penalises repeated low-team pairings when those pairings are unusually high
       relative to each player's broader season low-team partner mix
     """
@@ -23117,7 +23095,7 @@ def _compute_fairness_score(
     alpha_season = 50.0
     # Low-team imbalance penalty weight
     beta = 200.0
-    # NEW: low-team teammate-repeat penalty weight (season-only)
+    # Season-only low-team teammate-repeat penalty weight.
     gamma_low_pair = 90.0
 
     # Small noise only (tie-break)
@@ -23228,7 +23206,7 @@ def _compute_fairness_score(
                     "eff_uneven": int(eff_uneven.get(p, 0)),
                 })
 
-    # ---------- NEW: Season-only low-team teammate mix penalty ----------
+    # ---------- Season-only low-team teammate mix penalty ----------
     low_team_pair_penalty = 0.0
     low_team_pair_details = []
 
@@ -23466,8 +23444,8 @@ def _compute_team_size_advantage_map(scale: float = 6.0) -> dict[int, float]:
 
 
 # ======================================================================
-# PATCH A: Session/next_teams selectable players come from mr_roster
-#          (fallback to season match data if roster is empty)
+# Session/next_teams selectable players come from mr_roster,
+# falling back to season match data when the roster is empty.
 # ======================================================================
 
 def _get_all_players_from_roster() -> dict[str, str]:
@@ -23507,9 +23485,9 @@ def _get_all_players_prefer_roster() -> dict[str, str]:
     if roster_map:
         return roster_map
 
-    # Fallbacks (depending on what your file defines)
+    # Compatibility fallbacks for optional helpers.
     try:
-        return _get_all_players_unified()  # if present in your build
+        return _get_all_players_unified()  # optional unified helper
     except Exception:
         pass
 
@@ -23529,7 +23507,7 @@ except Exception:
 
 
 # ------------------------------------------------------------------------------------------------------------
-# DROP-IN: session_start (Roster-first, works with 0 games in the season)
+# session_start (roster-first, works with 0 games in the season)
 # ------------------------------------------------------------------------------------------------------------
 try:
     bot.remove_command("session_start")
@@ -23704,7 +23682,7 @@ async def fairness_debug(ctx):
 
 # ============================================================================================================
 # ============================================================================================================
-# Command - Help Me (UPDATED to include !season_story)
+# Command - Help Me
 # ============================================================================================================
 # ============================================================================================================
 
@@ -23931,14 +23909,14 @@ async def on_ready():
     except Exception as e:
         print("Startup init warning:", repr(e))
 
-    # Auto-import background polling has been removed. Use !auto_import_run manually after sessions.
+    # Background polling is disabled; use !auto_import_run manually after sessions.
 
     print(f"Logged in as {bot.user}")
     print("Marvel Rivals Stats Bot ready for action!")
 
 
 # ------------------------------------------------------------------------------------------------------------
-# Patch: Session Overview definition should be based on Brisbane-local game_stats.timestamp
+# Session Overview uses Brisbane-local game_stats.timestamp
 # ------------------------------------------------------------------------------------------------------------
 
 def _db_has_table(table_name: str) -> bool:
@@ -24021,8 +23999,7 @@ except Exception:
     pass
 
 # =====================================================================================
-# Season 6: Roster-first player pool for sessions / next_teams (works with 0 games)
-# Paste near end of file, ABOVE:  if __name__ == "__main__":
+# Roster-first player pool for sessions / next_teams (works with 0 games)
 # =====================================================================================
 
 def _get_all_players_roster_first() -> dict[str, str]:
@@ -24082,7 +24059,7 @@ def _get_all_players_roster_first() -> dict[str, str]:
 
         return out
 
-    # 2) Fallback: current-season API stats (existing behaviour)
+    # 2) Fallback: current-season API stats.
     season_id = int(get_current_season_id())
     c.execute("""
         SELECT
