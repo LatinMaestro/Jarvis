@@ -4,6 +4,7 @@ from rivalsmeta_adapter import (
     is_rivalsmeta_match_url,
     match_id_from_rivalsmeta_url,
     normalise_rivalsmeta_match_payload,
+    read_limited_response_body,
 )
 
 
@@ -63,6 +64,30 @@ class RivalsMetaAdapterTests(unittest.TestCase):
         self.assertEqual((player["kills"], player["deaths"], player["assists"]), (12, 8, 6))
         self.assertEqual(player["final_hits"], 5)
         self.assertEqual((hero["kills"], hero["deaths"], hero["assists"]), (12, 8, 6))
+
+
+class _ChunkedContent:
+    def __init__(self, chunks):
+        self.chunks = chunks
+
+    async def iter_chunked(self, _size):
+        for chunk in self.chunks:
+            yield chunk
+
+
+class RivalsMetaResponseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reads_all_chunks_before_json_decoding(self):
+        content = _ChunkedContent([b'{"match_uid":', b'"123_456",', b'"match_players":[]}'])
+
+        body = await read_limited_response_body(content)
+
+        self.assertEqual(body, b'{"match_uid":"123_456","match_players":[]}')
+
+    async def test_rejects_response_over_size_limit(self):
+        content = _ChunkedContent([b"12345", b"67890", b"x"])
+
+        with self.assertRaisesRegex(ValueError, "unexpectedly large"):
+            await read_limited_response_body(content, max_bytes=10)
 
 
 if __name__ == "__main__":

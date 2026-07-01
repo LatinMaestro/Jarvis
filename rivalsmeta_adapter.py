@@ -10,6 +10,18 @@ RIVALSMETA_API_BASE = "https://rivalsmeta.com/api"
 _RIVALSMETA_HOSTS = {"rivalsmeta.com", "www.rivalsmeta.com"}
 
 
+async def read_limited_response_body(content, max_bytes: int = 2_000_000) -> bytes:
+    """Read a complete streamed response without allowing an unbounded body."""
+    chunks = []
+    total = 0
+    async for chunk in content.iter_chunked(64 * 1024):
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValueError("RivalsMeta response was unexpectedly large.")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def match_id_from_rivalsmeta_url(value: str) -> str | None:
     """Return a match UID only for an HTTPS RivalsMeta /matches/<uid> URL."""
     try:
