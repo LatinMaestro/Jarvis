@@ -38,6 +38,7 @@ from zoneinfo import ZoneInfo
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 from rivalsmeta_adapter import (
     RIVALSMETA_API_BASE,
+    fetch_rivalsmeta_player_history,
     is_rivalsmeta_match_url,
     match_id_from_rivalsmeta_url,
     normalise_rivalsmeta_match_payload,
@@ -1580,7 +1581,7 @@ async def mr_api_get_json(path: str) -> dict:
             return await resp.json()
 
 
-async def rivalsmeta_get_match_json(match_uid: str) -> dict:
+async def rivalsmeta_get_match_json(match_uid: str, session=None) -> dict:
     """Fetch one public RivalsMeta match and translate it to Jarvis's payload shape."""
     match_uid = str(match_uid or "").strip()
     if not match_uid or len(match_uid) > 160 or not all(
@@ -1589,9 +1590,8 @@ async def rivalsmeta_get_match_json(match_uid: str) -> dict:
 
     url = f"{RIVALSMETA_API_BASE}/matches/{match_uid}"
     headers = {"User-Agent": "Jarvis-Marvel-Rivals-Bot/1.0"}
-    timeout = aiohttp.ClientTimeout(total=25)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(url, headers=headers, allow_redirects=False) as resp:
+    async def _fetch(active_session):
+        async with active_session.get(url, headers=headers, allow_redirects=False) as resp:
             if resp.status != 200:
                 text = await resp.text()
                 raise RuntimeError(f"RivalsMeta HTTP {resp.status}: {text[:200]}")
@@ -1603,6 +1603,14 @@ async def rivalsmeta_get_match_json(match_uid: str) -> dict:
                 raise RuntimeError(
                     f"RivalsMeta returned invalid JSON ({content_type}, {len(body)} bytes)."
                 ) from exc
+            return raw
+
+    if session is None:
+        timeout = aiohttp.ClientTimeout(total=25)
+        async with aiohttp.ClientSession(timeout=timeout) as owned_session:
+            raw = await _fetch(owned_session)
+    else:
+        raw = await _fetch(session)
 
     payload = normalise_rivalsmeta_match_payload(raw)
     returned_uid = str(payload["match_details"].get("match_uid") or "")
@@ -3322,6 +3330,7 @@ def _parse_auto_import_run_args(args) -> dict:
         "lookback_days": int(AUTO_IMPORT_MAX_LOOKBACK_DAYS),
         "refresh_roster": bool(AUTO_IMPORT_REFRESH_ROSTER_DEFAULT),
         "reset_cursor": False,
+        "provider": "auto",
     }
     for raw in args or []:
         a = str(raw).strip().lower()
@@ -3333,6 +3342,8 @@ def _parse_auto_import_run_args(args) -> dict:
             opts["refresh_roster"] = False
         elif a in ("reset_cursor", "reset-cursor", "--reset-cursor", "reset"):
             opts["reset_cursor"] = True
+        elif a in ("rivalsmeta", "--rivalsmeta", "fallback", "--fallback"):
+            opts["provider"] = "rivalsmeta"
         elif a.startswith("days=") or a.startswith("--days="):
             try:
                 opts["lookback_days"] = int(a.split("=", 1)[1])
@@ -3361,6 +3372,7 @@ async def _auto_import_tick(
     force: bool = False,
     status_cb=None,
     lookback_days: int | None = None,
+    provider: str = "auto",
 ):
     """
     Manual importer, optimised for low API usage.
@@ -3371,6 +3383,7 @@ async def _auto_import_tick(
       - Uses a rolling lookback window (default 4 days).
       - Persists a per-player/per-API-season cursor so old history is not re-scanned.
       - Fetches match details only for genuinely new, unimported, unskipped candidate matches.
+      - Falls back to RivalsMeta roster histories and match details when the official API fails.
     """
     def _status(phase: str = None, detail: str = None):
         if status_cb:
@@ -3410,6 +3423,9 @@ async def _auto_import_tick(
         api_seasons = _get_auto_import_api_seasons()
         imported_count = 0
         seen_match_uids: set[str] = set()
+        provider_mode = str(provider or "auto").strip().lower()
+        prefer_rivalsmeta_history = provider_mode == "rivalsmeta"
+        prefer_rivalsmeta_details = provider_mode == "rivalsmeta"
 
         counters = {
             "players_done": 0,
@@ -3430,11 +3446,15 @@ async def _auto_import_tick(
             "details_429": 0,
             "details_err": 0,
             "cursor_updates": 0,
+            "rivalsmeta_history_pages": 0,
+            "rivalsmeta_detail_matches": 0,
+            "history_fallbacks": 0,
+            "detail_fallbacks": 0,
         }
 
         _status(
             "Preparing queries…",
-            f"mode={query_mode}, players={len(queries)}, api_seasons={','.join(api_seasons)}, cutoff={cutoff_txt} Brisbane, max_import={MAX_MATCHES_TO_IMPORT_PER_TICK}",
+            f"mode={query_mode}, provider={provider_mode}, players={len(queries)}, api_seasons={','.join(api_seasons)}, cutoff={cutoff_txt} Brisbane, max_import={MAX_MATCHES_TO_IMPORT_PER_TICK}",
         )
 
         timeout = aiohttp.ClientTimeout(total=30)
@@ -3471,7 +3491,22 @@ async def _auto_import_tick(
                         )
 
                         try:
-                            hist = await _fetch_history_with_backoff(q, session, skip=skip, season=api_season)
+                            hist, history_source = await _fetch_history_with_provider_fallback(
+                                q,
+                                session,
+                                skip=skip,
+                                season=api_season,
+                                prefer_rivalsmeta=prefer_rivalsmeta_history,
+                            )
+                            if history_source == "rivalsmeta":
+                                if not prefer_rivalsmeta_history:
+                                    counters["history_fallbacks"] += 1
+                                    _status(
+                                        "RivalsMeta history fallback active",
+                                        "official history unavailable; using public roster histories for this run",
+                                    )
+                                prefer_rivalsmeta_history = True
+                                counters["rivalsmeta_history_pages"] += 1
                             await asyncio.sleep(float(AUTO_IMPORT_HISTORY_REQUEST_DELAY))
                         except RuntimeError as e:
                             had_error = True
@@ -3558,7 +3593,20 @@ async def _auto_import_tick(
                             )
 
                             try:
-                                payload = await _fetch_match_details(match_uid, session)
+                                payload, detail_source = await _fetch_match_details_with_provider_fallback(
+                                    match_uid,
+                                    session,
+                                    prefer_rivalsmeta=prefer_rivalsmeta_details,
+                                )
+                                if detail_source == "rivalsmeta":
+                                    if not prefer_rivalsmeta_details:
+                                        counters["detail_fallbacks"] += 1
+                                        _status(
+                                            "RivalsMeta detail fallback active",
+                                            "official match details unavailable; using public match pages for this run",
+                                        )
+                                    prefer_rivalsmeta_details = True
+                                    counters["rivalsmeta_detail_matches"] += 1
                                 await asyncio.sleep(float(AUTO_IMPORT_DETAIL_REQUEST_DELAY))
                             except RuntimeError as e:
                                 had_error = True
@@ -3603,7 +3651,7 @@ async def _auto_import_tick(
                                         match_dt_utc=match_dt,
                                         season_id=season_id,
                                         reason="DRAW",
-                                        source="auto_import_run",
+                                        source=f"auto_import_run:{detail_source}",
                                         details={
                                             "replay_id": md.get("replay_id"),
                                             "game_mode_id": gm.get("game_mode_id"),
@@ -3660,7 +3708,9 @@ async def _auto_import_tick(
             f"cursor_skips={counters['skip_cursor']} cutoff_skips={counters['skip_cutoff']} already={counters['skip_already_imported']} "
             f"deleted={counters['skip_deleted']} draws={counters['skip_draw_pre'] + counters['skip_draw_post']} min_humans={counters['skip_min_humans']} "
             f"429(history)={counters['api_429']} 429(details)={counters['details_429']} "
-            f"errors(history)={counters['api_err']} errors(details)={counters['details_err']} cursor_updates={counters['cursor_updates']}"
+            f"errors(history)={counters['api_err']} errors(details)={counters['details_err']} cursor_updates={counters['cursor_updates']} "
+            f"rivalsmeta(history_pages)={counters['rivalsmeta_history_pages']} rivalsmeta(details)={counters['rivalsmeta_detail_matches']} "
+            f"fallbacks(history/details)={counters['history_fallbacks']}/{counters['detail_fallbacks']}"
         )
 
         _set_setting("auto_import_last_run", _now_iso_utc())
@@ -3694,6 +3744,69 @@ async def _fetch_history_with_backoff(query: str,
                 continue
             raise  # other RuntimeErrors should bubble up
     raise RuntimeError("RATE_LIMIT_429 (exceeded retry attempts)")
+
+
+async def _fetch_history_with_provider_fallback(query: str,
+                                                session,
+                                                *,
+                                                skip: int,
+                                                season: str,
+                                                prefer_rivalsmeta: bool = False):
+    """Fetch history from the official API, falling back to RivalsMeta for UID rosters."""
+    official_error = None
+    if not prefer_rivalsmeta:
+        try:
+            history = await _fetch_history_with_backoff(
+                query,
+                session,
+                skip=skip,
+                season=season,
+            )
+            items = (history or {}).get("match_history") or []
+            if skip > 0 or (isinstance(items, list) and items):
+                return history, "official"
+            official_error = RuntimeError("official history returned an empty first page")
+        except Exception as exc:
+            official_error = exc
+
+    try:
+        history = await fetch_rivalsmeta_player_history(
+            query,
+            session,
+            skip=skip,
+            season=season,
+            game_mode=3,
+        )
+        return history, "rivalsmeta"
+    except Exception as rivalsmeta_error:
+        if official_error is None:
+            raise
+        raise RuntimeError(
+            f"Official history failed ({official_error}); RivalsMeta fallback failed ({rivalsmeta_error})."
+        ) from rivalsmeta_error
+
+
+async def _fetch_match_details_with_provider_fallback(
+        match_uid: str,
+        session,
+        *,
+        prefer_rivalsmeta: bool = False):
+    """Fetch full match details with a per-run RivalsMeta circuit breaker."""
+    official_error = None
+    if not prefer_rivalsmeta:
+        try:
+            return await _fetch_match_details(match_uid, session), "official"
+        except Exception as exc:
+            official_error = exc
+
+    try:
+        return await rivalsmeta_get_match_json(match_uid, session=session), "rivalsmeta"
+    except Exception as rivalsmeta_error:
+        if official_error is None:
+            raise
+        raise RuntimeError(
+            f"Official match details failed ({official_error}); RivalsMeta fallback failed ({rivalsmeta_error})."
+        ) from rivalsmeta_error
 
 async def _start_status_ticker(
     ctx,
@@ -4894,7 +5007,7 @@ async def auto_import_run(ctx, *args):
         _status_update(
             detail=(
                 f"manual_only=True, legacy_enabled={enabled}, roster_uids={len(roster_uids)}, roster_names={len(roster_names_norm)}, "
-                f"lookback_days={opts['lookback_days']}, api_seasons={','.join(api_seasons)}, reset_cursor={opts['reset_cursor']}"
+                f"lookback_days={opts['lookback_days']}, provider={opts['provider']}, api_seasons={','.join(api_seasons)}, reset_cursor={opts['reset_cursor']}"
             )
         )
 
@@ -4913,7 +5026,13 @@ async def auto_import_run(ctx, *args):
                 _status_update(detail=f"refresh queue failed: {str(e)[:160]} (continuing without refresh)")
 
         _status_update(phase="Importing recent matches…", detail="Fetching recent pages only / applying cursor / writing new matches")
-        await _auto_import_tick(bot, force=True, status_cb=_status_update, lookback_days=opts["lookback_days"])
+        await _auto_import_tick(
+            bot,
+            force=True,
+            status_cb=_status_update,
+            lookback_days=opts["lookback_days"],
+            provider=opts["provider"],
+        )
 
         final = (
             "**Auto-import status**\n"
@@ -4921,7 +5040,7 @@ async def auto_import_run(ctx, *args):
             f"Last run: `{_get_setting('auto_import_last_run')}`\n"
             f"Imported this run: `{_get_setting('auto_import_last_imported_count')}`\n"
             f"Summary: `{_get_setting('auto_import_last_summary', '—')}`\n"
-            "Note: background auto-import is disabled. Use `!auto_import_run` after each session. Use `!auto_import_run refresh` only when you want to force API-side roster updates first."
+            "Note: background auto-import is disabled. Use `!auto_import_run` after each session, or `!auto_import_run rivalsmeta` to force the backup provider."
         )
         await _stop_status_ticker(stop_event, ticker_task, status_msg, final_text=final)
 
@@ -23713,8 +23832,8 @@ async def helpme(ctx):
         (
             "🤖 Manual Auto Import",
             [
-                ("!auto_import_run [days=4] [refresh] [reset_cursor]",
-                 "Manual recent-match import. Default is no roster refresh, one recent page per player/API season, and cursor-based skipping."),
+                ("!auto_import_run [days=4] [refresh] [reset_cursor] [rivalsmeta]",
+                 "Manual official-first import with automatic RivalsMeta fallback; use rivalsmeta to force the backup provider."),
                 ("!auto_import_status",
                  "Show manual-import settings, cutoff, last run summary, and API seasons scanned."),
                 ("!auto_import_cutoff [YYYY-MM-DD]",
@@ -23868,7 +23987,7 @@ async def helpme(ctx):
             embed.add_field(name=title, value="\n".join(lines), inline=False)
 
         embed.set_footer(
-            text="Tip: Auto-import is manual in this build. Run !auto_import_run after each session."
+            text="Tip: Run !auto_import_run after each session; add rivalsmeta to force the backup provider."
         )
         await ctx.send(embed=embed)
 
@@ -23882,7 +24001,7 @@ async def helpme(ctx):
             for cmd, desc in items:
                 out.append(f"  - {cmd}: {desc}")
             out.append("")
-        out.append("Tip: Auto-import is manual in this build. Run !auto_import_run after each session.")
+        out.append("Tip: Run !auto_import_run after each session; add rivalsmeta to force the backup provider.")
         await ctx.send("```" + "\n".join(out) + "```")
 
 
