@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from urllib.parse import urlparse
 
 
@@ -46,6 +47,76 @@ def match_id_from_rivalsmeta_url(value: str) -> str | None:
 
 def is_rivalsmeta_match_url(value: str) -> bool:
     return match_id_from_rivalsmeta_url(value) is not None
+
+
+def rivalsmeta_season_id(season_label: str) -> int:
+    """Map Marvel Rivals season labels (for example 8 or 8.5) to RivalsMeta ids."""
+    raw = str(season_label or "").strip().upper()
+    if raw.startswith("S"):
+        raw = raw[1:]
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Unsupported RivalsMeta season label: {season_label}") from exc
+
+    season_number = int(value)
+    fraction = round(value - season_number, 3)
+    if season_number == 0 and fraction == 0:
+        return 1
+    if season_number < 1 or fraction not in (0, 0.5):
+        raise ValueError(f"Unsupported RivalsMeta season label: {season_label}")
+    return (season_number * 2) + (1 if fraction == 0.5 else 0)
+
+
+def normalise_rivalsmeta_history_payload(raw) -> dict:
+    """Wrap RivalsMeta's history list in the shape used by Jarvis discovery."""
+    if not isinstance(raw, list):
+        raise ValueError("RivalsMeta returned a non-list match history payload.")
+    return {"match_history": [item for item in raw if isinstance(item, dict)]}
+
+
+async def fetch_rivalsmeta_player_history(query: str,
+                                          session,
+                                          *,
+                                          skip: int,
+                                          season: str,
+                                          game_mode: int = 3) -> dict:
+    """Fetch and normalize one public RivalsMeta history page for a roster UID."""
+    player_uid = str(query or "").strip()
+    if not player_uid.isdigit():
+        raise RuntimeError("RivalsMeta history fallback requires roster UIDs.")
+
+    url = f"{RIVALSMETA_API_BASE}/player-match-history/{player_uid}"
+    params = {
+        "skip": max(0, int(skip)),
+        "game_mode_id": int(game_mode or 3),
+        "hero_id": 0,
+        "season": rivalsmeta_season_id(season),
+    }
+    headers = {"User-Agent": "Jarvis-Marvel-Rivals-Bot/1.0"}
+    async with session.get(url,
+                           params=params,
+                           headers=headers,
+                           allow_redirects=False) as response:
+        if response.status == 429:
+            raise RuntimeError("RATE_LIMIT_429")
+        if response.status != 200:
+            text = await response.text()
+            raise RuntimeError(
+                f"RivalsMeta history HTTP {response.status}: {text[:200]}")
+
+        body = await read_limited_response_body(response.content)
+        try:
+            raw = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            content_type = response.headers.get("Content-Type", "unknown")
+            raise RuntimeError(
+                f"RivalsMeta history returned invalid JSON ({content_type}, {len(body)} bytes)."
+            ) from exc
+
+    result = normalise_rivalsmeta_history_payload(raw)
+    result["_jarvis_source"] = "rivalsmeta"
+    return result
 
 
 def normalise_rivalsmeta_match_payload(raw: dict) -> dict:
