@@ -48,6 +48,10 @@ from jarvis.naming import (
     norm_simple as _norm_simple,
 )
 from jarvis.rendering.fonts import BODY_PT, DEFAULT_FONT_PATH, TITLE_PT, get_fonts
+from jarvis.stats.low_team import (
+    calculate_low_team_results as _calculate_low_team_results,
+    render_low_team_image as _render_low_team_image,
+)
 from jarvis.stats.team_size_records import (
     aggregate_records as _team_size_aggregate_records,
     eligible_exact_2v2_labels as _team_size_eligible_exact_2v2_labels,
@@ -15863,208 +15867,20 @@ async def head_to_head_cmd(ctx):
 # LOW-TEAM % (season-wide, manual + API via game_stats_v)
 # ============================================================================================================
 
-def create_low_team_image_with_percent(results,
-                                       title="Low-Team % (Uneven Games Only)"):
-    """
-    results: list of tuples:
-      - 5-field form: (player_name, on_less, uneven_total, pct_on_less, winpct_on_less)
-      - 6-field form: (player_name, on_less, uneven_total, pct_on_less, winpct_on_less, loss_pct_on_more)
-               where loss_pct_on_more may be None if never on the larger team.
-
-    Returns: BytesIO PNG buffer
-    """
-    body_font, title_font = get_fonts()
-
-    bg = (25, 25, 25)
-    fg = (230, 230, 230)
-    gold = (255, 215, 0)
-    header_bg = (40, 40, 40)
-    grid = (80, 80, 80)
-
-    headers = ["Player", "On Less", "Uneven", "% on Less", "Win% on Less", "Loss% on More"]
-
-    # Defensive: ensure something to render
-    rows = []
-    for item in (results or []):
-        # Support both the 5-field and 6-field tuple forms.
-        name = item[0] if len(item) > 0 else "—"
-        on_less = item[1] if len(item) > 1 else 0
-        uneven = item[2] if len(item) > 2 else 0
-        pct = item[3] if len(item) > 3 else 0.0
-        winpct = item[4] if len(item) > 4 else 0.0
-        loss_more = item[5] if len(item) > 5 else None
-
-        loss_more_txt = "—" if loss_more is None else f"{float(loss_more):.1f}%"
-
-        rows.append([
-            str(name),
-            str(int(on_less)),
-            str(int(uneven)),
-            f"{float(pct):.1f}%",
-            f"{float(winpct):.1f}%",
-            loss_more_txt,
-        ])
-
-    if not rows:
-        rows = [["—", "0", "0", "0.0%", "0.0%", "—"]]
-
-    pad = 20
-    title_h = 92
-    header_h = 54
-    row_h = 44
-
-    # Measure text widths for auto-fit columns
-    tmp = Image.new("RGB", (10, 10), bg)
-    td = ImageDraw.Draw(tmp)
-
-    def _tw(s) -> float:
-        return td.textlength(str(s), font=body_font)
-
-    # Column min/max widths tuned to match the other tables.
-    mins = [260, 120, 120, 160, 180, 200]
-    maxs = [520, 180, 180, 220, 240, 260]
-
-    col_w = []
-    for i, h in enumerate(headers):
-        w = max(_tw(h), max(_tw(r[i]) for r in rows)) + 26
-        col_w.append(int(min(maxs[i], max(mins[i], w))))
-
-    width = sum(col_w) + pad * 2
-    height = pad + title_h + 18 + header_h + row_h * len(rows) + pad
-
-    img = Image.new("RGB", (int(width), int(height)), bg)
-    d = ImageDraw.Draw(img)
-
-    # Title
-    d.text(((width - d.textlength(title, font=title_font)) // 2, pad),
-           title,
-           font=title_font,
-           fill=gold)
-
-    y = pad + title_h
-
-    # Header row
-    x = pad
-    for i, h in enumerate(headers):
-        d.rectangle([x, y, x + col_w[i], y + header_h],
-                    fill=header_bg,
-                    outline=grid)
-        d.text((x + 10, y + 14), h, font=body_font, fill=fg)
-        x += col_w[i]
-
-    # Data rows
-    y += header_h
-    for r in rows:
-        x = pad
-        for i, cell in enumerate(r):
-            d.rectangle([x, y, x + col_w[i], y + row_h], outline=grid)
-            d.text((x + 10, y + 10), str(cell), font=body_font, fill=fg)
-            x += col_w[i]
-        y += row_h
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    buf.seek(0)
-    return buf
+def create_low_team_image_with_percent(results, title="Low-Team % (Uneven Games Only)"):
+    return _render_low_team_image(results, title=title)
 
 
 @bot.command(name="low_team")
 async def low_team(ctx):
-    """
-    Season-wide Low-Team % using game_stats_v (therefore includes manual + API *if* they are present in game_stats_v).
-    Adds Loss% on More (loss rate while on the larger team), uneven games only.
-    """
-
-    def _canon(name: str) -> str:
-        # Strong normalisation (spaces/underscores/punctuation/case)
-        return re.sub(r"[^a-z0-9]+", "", (name or "").lower())
-
-    # game_stats_v is already filtered by the active season.
+    """Render season-wide low-team percentages from the current-season view."""
     c.execute("SELECT game_label, player, win FROM game_stats_v")
     rows = c.fetchall()
-
     if not rows:
         await ctx.send("No games found for this season.")
         return
 
-    games = defaultdict(lambda: {"1": set(), "0": set()})
-    display_names = {}
-
-    for game_label, player, win in rows:
-        if game_label is None or player is None:
-            continue
-        key = _canon(str(player))
-        if not key:
-            continue
-        games[str(game_label)][str(int(win or 0))].add(key)
-        display_names[key] = str(player)  # keep latest display
-
-    low_team_counts = defaultdict(int)        # games on smaller team
-    uneven_game_counts = defaultdict(int)     # uneven games played
-    low_team_win_counts = defaultdict(int)    # wins while on smaller team
-
-    on_more_counts = defaultdict(int)         # games on larger team
-    on_more_loss_counts = defaultdict(int)    # losses while on larger team
-
-    for _label, teams in games.items():
-        win_team = teams["1"]
-        loss_team = teams["0"]
-
-        if not win_team or not loss_team:
-            continue
-
-        # uneven only
-        if len(win_team) == len(loss_team):
-            continue
-
-        # all players in this uneven game
-        all_players = win_team.union(loss_team)
-        for p in all_players:
-            uneven_game_counts[p] += 1
-
-        # identify smaller team + whether it won
-        if len(win_team) < len(loss_team):
-            smaller = win_team
-            smaller_won = True
-            larger = loss_team
-            larger_lost = True
-        else:
-            smaller = loss_team
-            smaller_won = False
-            larger = win_team
-            larger_lost = False
-
-        # smaller team stats
-        for p in smaller:
-            low_team_counts[p] += 1
-            if smaller_won:
-                low_team_win_counts[p] += 1
-
-        # Larger-team statistics.
-        for p in larger:
-            on_more_counts[p] += 1
-            if larger_lost:
-                on_more_loss_counts[p] += 1
-
-    results = []
-    for p in uneven_game_counts:
-        name = display_names.get(p, p)
-        low = int(low_team_counts.get(p, 0))
-        unev = int(uneven_game_counts.get(p, 0))
-        wless = int(low_team_win_counts.get(p, 0))
-
-        pct_on_less = (low / unev * 100.0) if unev > 0 else 0.0
-        winpct_on_less = (wless / low * 100.0) if low > 0 else 0.0
-
-        more_ct = int(on_more_counts.get(p, 0))
-        more_losses = int(on_more_loss_counts.get(p, 0))
-        loss_pct_on_more = (more_losses / more_ct * 100.0) if more_ct > 0 else None
-
-        results.append((name, low, unev, pct_on_less, winpct_on_less, loss_pct_on_more))
-
-    # Sort: highest % on less first, then most uneven games
-    results.sort(key=lambda x: (x[3], x[2], x[0].lower()), reverse=True)
-
+    results = _calculate_low_team_results(rows)
     buf = create_low_team_image_with_percent(results, title="Low-Team % (Season)")
     await ctx.send(file=discord.File(fp=buf, filename="low_team.png"))
 
