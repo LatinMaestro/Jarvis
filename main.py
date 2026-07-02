@@ -68,6 +68,7 @@ from jarvis.stats.team_size_records import (
     eligible_min_4v4_labels as _team_size_eligible_min_4v4_labels,
     render_records_image as _team_size_render_records_image,
 )
+from jarvis.stats.top3 import load_human_match_rows as _load_top3_human_match_rows
 from rivalsmeta_adapter import (
     RIVALSMETA_API_BASE,
     fetch_rivalsmeta_player_history,
@@ -6612,20 +6613,7 @@ def _top3_more_build_base(season_id: int, top3_uids: list[int]) -> dict:
     if len(top3_set) != 3:
         raise ValueError("Exactly 3 selected players are required.")
 
-    c.execute(
-        """
-        SELECT match_uid, player_uid, player, camp, is_win
-        FROM mr_player_match
-        WHERE season_id = ?
-          AND is_bot = 0
-          AND match_uid IS NOT NULL
-          AND player_uid IS NOT NULL
-          AND player IS NOT NULL
-        ORDER BY rowid ASC
-        """,
-        (season_id,),
-    )
-    raw_rows = c.fetchall() or []
+    raw_rows = _load_top3_human_match_rows(c, season_id)
 
     if not raw_rows:
         return {
