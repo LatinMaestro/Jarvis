@@ -51,6 +51,7 @@ from jarvis.naming import (
 from jarvis.rendering.fonts import BODY_PT, DEFAULT_FONT_PATH, TITLE_PT, get_fonts
 from jarvis.stats.hero_bans import get_top_hero_bans as _get_top_hero_bans
 from jarvis.stats.hero_time import get_hero_time_by_player as _get_hero_time_by_player
+from jarvis.stats.games import get_recent_games as _get_recent_games
 from jarvis.stats.low_team import (
     calculate_low_team_results as _calculate_low_team_results,
     render_low_team_image as _render_low_team_image,
@@ -4160,48 +4161,7 @@ async def browse_games(ctx, limit: int = 40):
         except Exception:
             return None
 
-    # Prefer mr_match_meta (has match_time_utc)
-    c.execute(
-        """
-        SELECT game_label, match_uid, match_time_utc, imported_at
-        FROM mr_match_meta
-        WHERE season_id=?
-        ORDER BY datetime(imported_at) DESC
-        LIMIT ?
-        """,
-        (season_id, n),
-    )
-    rows = c.fetchall() or []
-
-    # Fallback to match_imports if meta missing
-    if not rows:
-        c.execute(
-            """
-            SELECT game_label, match_uid, imported_at
-            FROM match_imports
-            WHERE season_id=?
-            ORDER BY datetime(imported_at) DESC
-            LIMIT ?
-            """,
-            (season_id, n),
-        )
-        tmp = c.fetchall() or []
-        rows = [(gl, mu, None, ia) for (gl, mu, ia) in tmp]
-
-    # Final fallback: legacy view (no match_uid)
-    if not rows:
-        c.execute(
-            """
-            SELECT game_label, MAX(timestamp) AS ts
-            FROM game_stats_v
-            GROUP BY game_label
-            ORDER BY MAX(timestamp) DESC
-            LIMIT ?
-            """,
-            (n,),
-        )
-        tmp = c.fetchall() or []
-        rows = [(gl, None, None, ts) for (gl, ts) in tmp]
+    rows = _get_recent_games(c, season_id, n)
 
     if not rows:
         await ctx.send(f"No games recorded yet for Season {season_id}.")
