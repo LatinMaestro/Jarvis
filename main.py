@@ -51,6 +51,7 @@ from jarvis.naming import (
 from jarvis.rendering.fonts import BODY_PT, DEFAULT_FONT_PATH, TITLE_PT, get_fonts
 from jarvis.stats.hero_bans import get_top_hero_bans as _get_top_hero_bans
 from jarvis.stats.hero_time import get_hero_time_by_player as _get_hero_time_by_player
+from jarvis.stats.hero_roles import load_hero_cache_rows, load_season_hero_usage
 from jarvis.stats.games import get_recent_games as _get_recent_games
 from jarvis.stats.low_team import (
     calculate_low_team_results as _calculate_low_team_results,
@@ -4338,8 +4339,7 @@ async def hero_roles_check(ctx, *args):
     cache = {}  # hid_int -> (name, role)
     bad_cache_ids = []
     try:
-        c.execute("SELECT hero_id, hero_name, hero_role FROM hero_cache")
-        for hid, name, role in (c.fetchall() or []):
+        for hid, name, role in load_hero_cache_rows(c):
             hid_s = str(hid or "").strip()
             hid_digits = _digits_only(hid_s) or hid_s
             if not hid_digits:
@@ -4358,15 +4358,7 @@ async def hero_roles_check(ctx, *args):
     usage = []  # (hid_raw, hid_i, sec)
     bad_segment_ids = []
     try:
-        c.execute("""
-            SELECT hero_id, SUM(COALESCE(seconds,0)) AS sec
-            FROM mr_hero_segments
-            WHERE season_id=?
-            GROUP BY hero_id
-            HAVING sec > 0
-            ORDER BY sec DESC
-        """, (int(season_id),))
-        for hid, sec in (c.fetchall() or []):
+        for hid, sec in load_season_hero_usage(c, season_id):
             hid_s = str(hid or "").strip()
             hid_digits = _digits_only(hid_s) or hid_s
             if not hid_digits:
