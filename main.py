@@ -65,6 +65,7 @@ from jarvis.stats.seasons import (
     season_game_count as _read_season_game_count,
 )
 from jarvis.stats.sessions import (
+    aggregate_wl_for_labels as _read_session_wl,
     load_all_ordered_game_labels,
     load_games_grouped_by_local_date,
 )
@@ -8328,46 +8329,7 @@ def _aggregate_wl_for_labels_api(season_id: int,
     Season standings-style aggregate (humans only).
     Returns DF with: player_uid, player, wins, losses, wl_str, winrate
     """
-    if not labels:
-        return pandas.DataFrame()
-
-    qmarks = ",".join("?" for _ in labels)
-    c.execute(
-        f"""
-        SELECT
-            pm.player_uid,
-            MAX(pm.player) as player,
-            SUM(CASE WHEN pm.is_win=1 THEN 1 ELSE 0 END) AS wins,
-            SUM(CASE WHEN pm.is_win=0 THEN 1 ELSE 0 END) AS losses
-        FROM mr_player_match pm
-        WHERE pm.season_id=?
-          AND pm.is_bot=0
-          AND pm.game_label IN ({qmarks})
-        GROUP BY pm.player_uid
-    """, (season_id, *labels))
-
-    rows = c.fetchall()
-    data = []
-    for uid, player, wins, losses in rows:
-        wins = int(wins or 0)
-        losses = int(losses or 0)
-        g = wins + losses
-        if g <= 0:
-            continue
-        data.append({
-            "player_uid": int(uid),
-            "player": str(player),
-            "wins": wins,
-            "losses": losses,
-            "wl_str": f"{wins}/{losses}",
-            "winrate": round((wins / g) * 100.0, 1)
-        })
-
-    df = pandas.DataFrame(data)
-    if df.empty:
-        return df
-    return df.sort_values(by=["winrate", "wins"],
-                          ascending=[False, False]).reset_index(drop=True)
+    return _read_session_wl(c, season_id, labels)
 
 
 def _add_rank_deltas(after_df: pandas.DataFrame,
