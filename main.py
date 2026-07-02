@@ -49,6 +49,7 @@ from jarvis.naming import (
 )
 from jarvis.rendering.fonts import BODY_PT, DEFAULT_FONT_PATH, TITLE_PT, get_fonts
 from jarvis.stats.hero_bans import get_top_hero_bans as _get_top_hero_bans
+from jarvis.stats.hero_time import get_hero_time_by_player as _get_hero_time_by_player
 from jarvis.stats.low_team import (
     calculate_low_team_results as _calculate_low_team_results,
     render_low_team_image as _render_low_team_image,
@@ -5710,33 +5711,13 @@ async def hero_time(ctx, *, player_name: str = None):
     ensure_mr_api_tables()
     season_id = get_current_season_id()
 
-    params = [season_id]
-    where = "WHERE season_id = ?"
-
-    if player_name:
-        pn = canonical_player_name(player_name.strip())
-        where += " AND player = ?"
-        params.append(pn)
-
-    c.execute(
-        f"""
-        SELECT player, hero_id, SUM(seconds) AS total_seconds
-        FROM hero_time_stats
-        {where}
-        GROUP BY player, hero_id
-        ORDER BY player ASC, total_seconds DESC
-    """, params)
-
-    rows = c.fetchall()
-    if not rows:
+    canonical_name = canonical_player_name(player_name.strip()) if player_name else None
+    by_player = _get_hero_time_by_player(c, season_id, canonical_name)
+    if not by_player:
         await ctx.send(
             "No hero time data yet. Import matches first with `!submit_match`."
         )
         return
-
-    by_player = defaultdict(list)
-    for player, hero_id, total_seconds in rows:
-        by_player[player].append((str(hero_id), int(total_seconds)))
 
     lines = []
     if player_name:
