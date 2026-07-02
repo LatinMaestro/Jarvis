@@ -54,6 +54,10 @@ from jarvis.stats.low_team import (
     calculate_low_team_results as _calculate_low_team_results,
     render_low_team_image as _render_low_team_image,
 )
+from jarvis.stats.seasons import (
+    season_date_range as _read_season_date_range,
+    season_game_count as _read_season_game_count,
+)
 from jarvis.stats.team_size_records import (
     aggregate_records as _team_size_aggregate_records,
     eligible_exact_2v2_labels as _team_size_eligible_exact_2v2_labels,
@@ -3991,20 +3995,7 @@ def _season_game_count(season_id: int) -> int:
     Prefer match_imports because API import is now the source of truth.
     Fallback to game_stats if needed.
     """
-    try:
-        c.execute(
-            "SELECT COUNT(DISTINCT game_label) FROM match_imports WHERE season_id=?",
-            (season_id, ))
-        n = (c.fetchone() or [0])[0] or 0
-        if n:
-            return int(n)
-    except Exception:
-        pass
-
-    c.execute(
-        "SELECT COUNT(DISTINCT game_label) FROM game_stats WHERE season_id=?",
-        (season_id, ))
-    return int((c.fetchone() or [0])[0] or 0)
+    return _read_season_game_count(c, season_id)
 
 
 def _season_date_range(season_id: int):
@@ -4013,29 +4004,7 @@ def _season_date_range(season_id: int):
     Fallback to game_stats timestamps if required.
     Returns (min_date_str, max_date_str) or (None, None)
     """
-    try:
-        c.execute(
-            """
-            SELECT MIN(imported_at), MAX(imported_at)
-            FROM mr_match_meta
-            WHERE season_id=?
-        """, (season_id, ))
-        mn, mx = c.fetchone() or (None, None)
-        if mn and mx:
-            return str(mn)[:10], str(mx)[:10]
-    except Exception:
-        pass
-
-    c.execute(
-        """
-        SELECT MIN(timestamp), MAX(timestamp)
-        FROM game_stats
-        WHERE season_id=?
-    """, (season_id, ))
-    mn, mx = c.fetchone() or (None, None)
-    if mn and mx:
-        return str(mn)[:10], str(mx)[:10]
-    return None, None
+    return _read_season_date_range(c, season_id)
 
 
 def _ensure_season_exists_api(season_id: int):
