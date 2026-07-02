@@ -1,3 +1,6 @@
+import pandas
+
+
 def load_games_grouped_by_local_date(
     cursor,
     season_id: int,
@@ -58,5 +61,3 @@ def aggregate_wl_for_labels(cursor, season_id: int, labels: list[str]) -> pandas
     if frame.empty:
         return frame
     return frame.sort_values(by=["winrate", "wins"], ascending=[False, False]).reset_index(drop=True)
-import pandas
-
