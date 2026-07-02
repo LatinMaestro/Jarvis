@@ -64,6 +64,10 @@ from jarvis.stats.seasons import (
     season_date_range as _read_season_date_range,
     season_game_count as _read_season_game_count,
 )
+from jarvis.stats.sessions import (
+    load_all_ordered_game_labels,
+    load_games_grouped_by_local_date,
+)
 from jarvis.stats.team_size_records import (
     aggregate_records as _team_size_aggregate_records,
     eligible_exact_2v2_labels as _team_size_eligible_exact_2v2_labels,
@@ -8299,29 +8303,9 @@ def _get_games_grouped_by_date_api(season_id: int):
     """
     ensure_mr_api_tables()
 
-    c.execute(
-        """
-        SELECT
-            game_label,
-            MIN(datetime(imported_at, ?)) AS first_local
-        FROM match_imports
-        WHERE season_id=?
-        GROUP BY game_label
-        ORDER BY datetime(first_local) ASC
-    """, (f"+{BRISBANE_UTC_OFFSET_HOURS} hours", season_id))
-
-    per_game = c.fetchall()
-
-    by_date = {}
-    ordered_dates = []
-    for label, first_local in per_game:
-        d = (first_local or "")[:10]
-        if d not in by_date:
-            by_date[d] = []
-            ordered_dates.append(d)
-        by_date[d].append(label)
-
-    return ordered_dates, by_date
+    return load_games_grouped_by_local_date(
+        c, season_id, BRISBANE_UTC_OFFSET_HOURS
+    )
 
 
 def _session_labels_for_date_api(season_id: int, date_str: str | None):
@@ -8335,17 +8319,7 @@ def _session_labels_for_date_api(season_id: int, date_str: str | None):
 
 def _all_ordered_game_labels_api(season_id: int) -> list[str]:
     ensure_mr_api_tables()
-    c.execute(
-        """
-        SELECT
-            game_label,
-            MIN(datetime(imported_at, ?)) AS first_local
-        FROM match_imports
-        WHERE season_id=?
-        GROUP BY game_label
-        ORDER BY datetime(first_local) ASC
-    """, (f"+{BRISBANE_UTC_OFFSET_HOURS} hours", season_id))
-    return [r[0] for r in c.fetchall()]
+    return load_all_ordered_game_labels(c, season_id, BRISBANE_UTC_OFFSET_HOURS)
 
 
 def _aggregate_wl_for_labels_api(season_id: int,
