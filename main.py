@@ -48,6 +48,12 @@ from jarvis.naming import (
     norm_simple as _norm_simple,
 )
 from jarvis.rendering.fonts import BODY_PT, DEFAULT_FONT_PATH, TITLE_PT, get_fonts
+from jarvis.stats.team_size_records import (
+    aggregate_records as _team_size_aggregate_records,
+    eligible_exact_2v2_labels as _team_size_eligible_exact_2v2_labels,
+    eligible_min_4v4_labels as _team_size_eligible_min_4v4_labels,
+    render_records_image as _team_size_render_records_image,
+)
 from rivalsmeta_adapter import (
     RIVALSMETA_API_BASE,
     fetch_rivalsmeta_player_history,
@@ -11795,201 +11801,17 @@ except Exception:
 
 
 def _eligible_2v2_humans_game_labels_api(season_id: int) -> list[str]:
-    """
-    Returns game_label list where match has exactly 4 humans total and they are split 2-and-2 across 2 camps.
-    Bots allowed (any number).
-    """
     ensure_mr_api_tables()
-
-    try:
-        c.execute(
-            """
-            WITH human_by_camp AS (
-                SELECT
-                    season_id,
-                    game_label,
-                    match_uid,
-                    camp,
-                    COUNT(*) AS n
-                FROM mr_player_match
-                WHERE season_id=?
-                  AND COALESCE(is_bot,0)=0
-                  AND camp IS NOT NULL
-                GROUP BY season_id, game_label, match_uid, camp
-            ),
-            per_game AS (
-                SELECT
-                    season_id,
-                    game_label,
-                    match_uid,
-                    SUM(n)       AS human_ct,
-                    COUNT(*)     AS human_camp_ct,
-                    MIN(n)       AS min_humans_same_camp,
-                    MAX(n)       AS max_humans_same_camp
-                FROM human_by_camp
-                GROUP BY season_id, game_label, match_uid
-            )
-            SELECT game_label
-            FROM per_game
-            WHERE human_ct=4
-              AND human_camp_ct=2
-              AND min_humans_same_camp=2
-              AND max_humans_same_camp=2
-            ORDER BY game_label ASC
-            """,
-            (int(season_id),),
-        )
-        return [str(r[0]) for r in (c.fetchall() or []) if r and r[0] is not None]
-    except Exception:
-        return []
+    return _team_size_eligible_exact_2v2_labels(c, season_id)
 
 
 def _aggregate_wl_for_labels_2v2_humans_api(season_id: int, labels: list[str]) -> "pandas.DataFrame":
-    """
-    Aggregates W/L per player_uid for supplied game_label list (humans only).
-    Returns DF with: player_uid, player, games, wins, losses, wl_str, winrate
-    """
     ensure_mr_api_tables()
-    import pandas
-
-    if not labels:
-        return pandas.DataFrame(columns=["player_uid", "player", "games", "wins", "losses", "wl_str", "winrate"])
-
-    qmarks = ",".join("?" for _ in labels)
-    c.execute(
-        f"""
-        SELECT
-            pm.player_uid,
-            MAX(pm.player) as player,
-            SUM(CASE WHEN pm.is_win=1 THEN 1 ELSE 0 END) AS wins,
-            SUM(CASE WHEN pm.is_win=0 THEN 1 ELSE 0 END) AS losses
-        FROM mr_player_match pm
-        WHERE pm.season_id=?
-          AND COALESCE(pm.is_bot,0)=0
-          AND pm.game_label IN ({qmarks})
-        GROUP BY pm.player_uid
-        """,
-        (int(season_id), *labels),
-    )
-
-    rows = c.fetchall() or []
-    data = []
-    for uid, player, wins, losses in rows:
-        wins = int(wins or 0)
-        losses = int(losses or 0)
-        g = wins + losses
-        if g <= 0:
-            continue
-        data.append(
-            {
-                "player_uid": int(uid),
-                "player": str(player),
-                "games": int(g),
-                "wins": wins,
-                "losses": losses,
-                "wl_str": f"{wins}/{losses}",
-                "winrate": round((wins / g) * 100.0, 1),
-            }
-        )
-
-    df = pandas.DataFrame(data)
-    if df.empty:
-        return df
-
-    return df.sort_values(by=["winrate", "wins", "games"], ascending=[False, False, False]).reset_index(drop=True)
+    return _team_size_aggregate_records(c, season_id, labels)
 
 
 def create_2v2_records_image(results, title="2v2 (Humans) Records"):
-    """
-    results: list of tuples:
-      (player_name, games, wins, losses, winrate_float)
-
-    Returns: BytesIO PNG buffer
-    """
-    body_font, title_font = get_fonts()
-
-    bg = (25, 25, 25)
-    fg = (230, 230, 230)
-    gold = (255, 215, 0)
-    header_bg = (40, 40, 40)
-    grid = (80, 80, 80)
-
-    headers = ["Player", "Games", "W", "L", "W/L", "Win%"]
-
-    rows = []
-    for item in (results or []):
-        name = item[0] if len(item) > 0 else "—"
-        games = int(item[1] if len(item) > 1 else 0)
-        wins = int(item[2] if len(item) > 2 else 0)
-        losses = int(item[3] if len(item) > 3 else 0)
-        winrate = float(item[4] if len(item) > 4 else 0.0)
-
-        rows.append([
-            str(name),
-            str(games),
-            str(wins),
-            str(losses),
-            f"{wins}/{losses}",
-            f"{winrate:.1f}%",
-        ])
-
-    if not rows:
-        rows = [["—", "0", "0", "0", "0/0", "0.0%"]]
-
-    pad = 20
-    title_h = 92
-    header_h = 54
-    row_h = 44
-
-    tmp = Image.new("RGB", (10, 10), bg)
-    td = ImageDraw.Draw(tmp)
-
-    def _tw(s) -> float:
-        return td.textlength(str(s), font=body_font)
-
-    # Tuned to match the other image-table styles.
-    mins = [280, 120, 90, 90, 130, 140]
-    maxs = [560, 160, 110, 110, 160, 180]
-
-    col_w = []
-    for i, h in enumerate(headers):
-        w = max(_tw(h), max(_tw(r[i]) for r in rows)) + 26
-        col_w.append(int(min(maxs[i], max(mins[i], w))))
-
-    width = sum(col_w) + pad * 2
-    height = pad + title_h + 18 + header_h + row_h * len(rows) + pad
-
-    img = Image.new("RGB", (int(width), int(height)), bg)
-    d = ImageDraw.Draw(img)
-
-    d.text(((width - d.textlength(title, font=title_font)) // 2, pad),
-           title,
-           font=title_font,
-           fill=gold)
-
-    y = pad + title_h
-
-    # Header row
-    x = pad
-    for i, h in enumerate(headers):
-        d.rectangle([x, y, x + col_w[i], y + header_h], fill=header_bg, outline=grid)
-        d.text((x + 10, y + 14), h, font=body_font, fill=fg)
-        x += col_w[i]
-
-    # Data rows
-    y += header_h
-    for r in rows:
-        x = pad
-        for i, cell in enumerate(r):
-            d.rectangle([x, y, x + col_w[i], y + row_h], outline=grid)
-            d.text((x + 10, y + 10), str(cell), font=body_font, fill=fg)
-            x += col_w[i]
-        y += row_h
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    buf.seek(0)
-    return buf
+    return _team_size_render_records_image(results, title=title)
 
 
 @bot.command(name="2v2_records")
@@ -12047,51 +11869,8 @@ except Exception:
 
 
 def _eligible_min_4v4_humans_game_labels_api(season_id: int) -> list[str]:
-    """
-    Returns game_label list where match has at least 8 humans total and at least 4 humans on each of 2 camps.
-    Bots allowed (any number).
-    """
     ensure_mr_api_tables()
-
-    try:
-        c.execute(
-            """
-            WITH human_by_camp AS (
-                SELECT
-                    season_id,
-                    game_label,
-                    match_uid,
-                    camp,
-                    COUNT(*) AS n
-                FROM mr_player_match
-                WHERE season_id=?
-                  AND COALESCE(is_bot,0)=0
-                  AND camp IS NOT NULL
-                GROUP BY season_id, game_label, match_uid, camp
-            ),
-            per_game AS (
-                SELECT
-                    season_id,
-                    game_label,
-                    match_uid,
-                    SUM(n)       AS human_ct,
-                    COUNT(*)     AS human_camp_ct,
-                    MIN(n)       AS min_humans_same_camp
-                FROM human_by_camp
-                GROUP BY season_id, game_label, match_uid
-            )
-            SELECT game_label
-            FROM per_game
-            WHERE human_ct>=8
-              AND human_camp_ct=2
-              AND min_humans_same_camp>=4
-            ORDER BY game_label ASC
-            """,
-            (int(season_id),),
-        )
-        return [str(r[0]) for r in (c.fetchall() or []) if r and r[0] is not None]
-    except Exception:
-        return []
+    return _team_size_eligible_min_4v4_labels(c, season_id)
 
 
 @bot.command(name="4v4_records")
