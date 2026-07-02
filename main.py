@@ -48,6 +48,7 @@ from jarvis.naming import (
     norm_simple as _norm_simple,
 )
 from jarvis.rendering.fonts import BODY_PT, DEFAULT_FONT_PATH, TITLE_PT, get_fonts
+from jarvis.stats.hero_bans import get_top_hero_bans as _get_top_hero_bans
 from jarvis.stats.low_team import (
     calculate_low_team_results as _calculate_low_team_results,
     render_low_team_image as _render_low_team_image,
@@ -6319,19 +6320,7 @@ async def hero_bans(ctx):
     ensure_mr_api_tables()
     season_id = get_current_season_id()
 
-    c.execute(
-        """
-        SELECT
-            hero_id,
-            COUNT(*) AS ban_events
-        FROM hero_bans
-        WHERE season_id = ?
-        GROUP BY hero_id
-        ORDER BY ban_events DESC
-        LIMIT 30
-    """, (season_id, ))
-
-    rows = c.fetchall()
+    rows = _get_top_hero_bans(c, season_id, limit=30)
     if not rows:
         await ctx.send(f"No ban data recorded for Season {season_id} yet. "
                        "Import matches first using `!submit_match`.")
