@@ -36,6 +36,14 @@ from itertools import combinations
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
+from jarvis.formatting import format_duration as _fmt_time
+from jarvis.naming import (
+    PREFERRED_PLAYERS,
+    canonical_player_name,
+    norm_key,
+    norm_simple as _norm_simple,
+)
+from jarvis.rendering.fonts import BODY_PT, DEFAULT_FONT_PATH, TITLE_PT, get_fonts
 from rivalsmeta_adapter import (
     RIVALSMETA_API_BASE,
     fetch_rivalsmeta_player_history,
@@ -46,43 +54,11 @@ from rivalsmeta_adapter import (
 )
 
 # =========================
-# Global visual settings
-# =========================
-DEFAULT_FONT_PATH = "cour.ttf"
-BODY_PT = 24
-TITLE_PT = 36
-
-# =========================
 # Team Fairness Session State (keep for !session_* / !next_teams)
 # =========================
 SESSION_STATES = {}  # key = (guild_id, channel_id) -> SessionState
 FAIRNESS_CONTEXTS = {}  # key = (guild_id, channel_id) -> FairnessContext
 _PERSISTENT_NEXTTEAMS_VIEWS_REGISTERED = False
-
-# =========================
-# Fonts (robust fallback chain)
-# =========================
-def get_fonts(font_path: str = DEFAULT_FONT_PATH,
-              body_pt: int = BODY_PT,
-              title_pt: int = TITLE_PT):
-    candidate_paths = [
-        font_path,
-        "DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-    ]
-    for candidate in candidate_paths:
-        try:
-            body_font = ImageFont.truetype(candidate, body_pt)
-            title_font = ImageFont.truetype(candidate, title_pt)
-            return body_font, title_font
-        except Exception:
-            continue
-
-    body_font = title_font = ImageFont.load_default()
-    return body_font, title_font
-
 
 # =========================
 # Discord bot setup
@@ -149,44 +125,6 @@ try:
 except Exception:
     pass
 c = conn.cursor()
-
-
-# =========================
-# Name normalisation + canonical naming
-# =========================
-def norm_key(name: str) -> str:
-    return re.sub(r"[\s\._]+", "", (name or "").strip().lower())
-
-
-PREFERRED_PLAYERS = [
-    "Andrecinho10",
-    "Fandangleberry",
-    "bLindDisc",
-    "AncientChunk",
-    "Rhyscomes69",
-    "LatinMaestro",
-    "NevSONIC",
-    "Nev Pounder",
-    "Nuffmans",
-    "Nev_blade7",
-    "Quake_",
-    "barber_sturgeo",
-    "Maarrvvnn",
-    "Hayd4n",
-    "xX_Harold_Xx",
-]
-_CANON = {norm_key(p): p for p in PREFERRED_PLAYERS}
-_CANON[norm_key("Nuffman")] = "Nuffmans"  # alias example
-
-def _norm_simple(name: str) -> str:
-    """Normalise a player name for stable keying (matrices, matching, etc.).
-
-    Removes spaces and punctuation, lowercases, and keeps only a-z/0-9.
-    """
-    return re.sub(r"[^a-z0-9]+", "", (name or "").strip().lower())
-
-def canonical_player_name(name: str) -> str:
-    return _CANON.get(norm_key(name), name)
 
 
 # =========================
@@ -1546,17 +1484,6 @@ def extract_match_id(url_or_id: str) -> str | None:
 
     # A match_uid typically contains underscores; accept as-is
     return s if s else None
-
-
-def _fmt_time(seconds: int) -> str:
-    seconds = int(seconds or 0)
-    m, s = divmod(seconds, 60)
-    h, m = divmod(m, 60)
-    if h:
-        return f"{h}h {m}m"
-    if m:
-        return f"{m}m {s}s"
-    return f"{s}s"
 
 
 async def mr_api_get_json(path: str) -> dict:
