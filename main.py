@@ -53,7 +53,7 @@ from jarvis.stats.hero_bans import get_top_hero_bans as _get_top_hero_bans
 from jarvis.stats.hero_time import get_hero_time_by_player as _get_hero_time_by_player
 from jarvis.stats.hero_roles import load_hero_cache_rows, load_season_hero_usage
 from jarvis.stats.games import get_recent_games as _get_recent_games
-from jarvis.stats.head_to_head import get_opponent_match_uids
+from jarvis.stats.head_to_head import get_opponent_match_uids, load_player_totals
 from jarvis.stats.low_team import (
     calculate_low_team_results as _calculate_low_team_results,
     render_low_team_image as _render_low_team_image,
@@ -13890,30 +13890,7 @@ def _h2h_get_player_totals_in_matches(season_id: int, player_uid: int, match_uid
     if not match_uids:
         return {"games": 0, "wins": 0, "losses": 0, "kills": 0, "deaths": 0, "assists": 0, "dmg": 0, "heal": 0, "taken": 0}
 
-    ph = ",".join(["?"] * len(match_uids))
-    sql = f"""
-        SELECT
-            COUNT(*) as games,
-            SUM(CASE WHEN is_win=1 THEN 1 ELSE 0 END) as wins,
-            SUM(CASE WHEN is_win=0 THEN 1 ELSE 0 END) as losses,
-            SUM(kills) as kills,
-            SUM(deaths) as deaths,
-            SUM(assists) as assists,
-            SUM(total_hero_damage) as dmg,
-            SUM(total_hero_heal) as heal,
-            SUM(total_damage_taken) as taken
-        FROM mr_player_match
-        WHERE season_id=?
-          AND player_uid=?
-          AND is_bot=0
-          AND match_uid IN ({ph})
-    """
-    args = [int(season_id), int(player_uid)] + [str(m) for m in match_uids]
-    try:
-        c.execute(sql, tuple(args))
-        r = c.fetchone() or (0, 0, 0, 0, 0, 0, 0, 0, 0)
-    except Exception:
-        r = (0, 0, 0, 0, 0, 0, 0, 0, 0)
+    r = load_player_totals(c, season_id, player_uid, match_uids)
 
     games, wins, losses, k, d, a, dmg, heal, taken = r
     return {
