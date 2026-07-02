@@ -53,6 +53,7 @@ from jarvis.stats.hero_bans import get_top_hero_bans as _get_top_hero_bans
 from jarvis.stats.hero_time import get_hero_time_by_player as _get_hero_time_by_player
 from jarvis.stats.hero_roles import load_hero_cache_rows, load_season_hero_usage
 from jarvis.stats.games import get_recent_games as _get_recent_games
+from jarvis.stats.head_to_head import get_opponent_match_uids
 from jarvis.stats.low_team import (
     calculate_low_team_results as _calculate_low_team_results,
     render_low_team_image as _render_low_team_image,
@@ -13944,30 +13945,7 @@ def _h2h_fmt_num(v) -> str:
 def _h2h_get_opponent_match_uids(season_id: int, uid_a: int, uid_b: int) -> list[str]:
     """Returns match_uids where BOTH players played and were OPPONENTS (is_win differs)."""
     ensure_mr_api_tables()
-    try:
-        c.execute(
-            """
-            SELECT a.match_uid
-            FROM mr_player_match a
-            JOIN mr_player_match b
-              ON b.season_id=a.season_id
-             AND b.match_uid=a.match_uid
-             AND b.game_label=a.game_label
-            WHERE a.season_id=?
-              AND a.player_uid=?
-              AND b.player_uid=?
-              AND COALESCE(a.is_bot,0)=0
-              AND COALESCE(b.is_bot,0)=0
-              AND a.is_win IS NOT NULL
-              AND b.is_win IS NOT NULL
-              AND a.is_win != b.is_win
-            """,
-            (int(season_id), int(uid_a), int(uid_b)),
-        )
-        rows = c.fetchall() or []
-        return [str(r[0]) for r in rows if r and r[0] is not None]
-    except Exception:
-        return []
+    return get_opponent_match_uids(c, season_id, uid_a, uid_b)
 
 
 def _h2h_get_player_totals_in_matches(season_id: int, player_uid: int, match_uids: list[str]) -> dict:
