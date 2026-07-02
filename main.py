@@ -57,6 +57,7 @@ from jarvis.stats.low_team import (
     calculate_low_team_results as _calculate_low_team_results,
     render_low_team_image as _render_low_team_image,
 )
+from jarvis.stats.player_bans import load_ban_events, load_human_player_matches
 from jarvis.stats.seasons import (
     season_date_range as _read_season_date_range,
     season_game_count as _read_season_game_count,
@@ -6297,18 +6298,7 @@ async def player_bans(ctx):
     # Build: player_matches + player_side from mr_player_match (exclude bots)
     # ---------------------------------------------------------------------
     try:
-        c.execute(
-            """
-            SELECT match_uid, player, camp
-            FROM mr_player_match
-            WHERE season_id = ?
-              AND COALESCE(is_bot, 0) = 0
-              AND match_uid IS NOT NULL
-              AND player IS NOT NULL
-            """,
-            (int(season_id),),
-        )
-        pm_rows = c.fetchall()
+        pm_rows = load_human_player_matches(c, season_id)
     except Exception as e:
         await ctx.send(f"Could not read mr_player_match: {repr(e)}")
         return
@@ -6335,18 +6325,7 @@ async def player_bans(ctx):
     # Build: bans_by_match_side from mr_ban_picks (is_pick = 0 => bans)
     # ---------------------------------------------------------------------
     try:
-        c.execute(
-            """
-            SELECT match_uid, battle_side, hero_id
-            FROM mr_ban_picks
-            WHERE season_id = ?
-              AND is_pick = 0
-              AND hero_id IS NOT NULL
-              AND match_uid IS NOT NULL
-            """,
-            (int(season_id),),
-        )
-        ban_rows = c.fetchall()
+        ban_rows = load_ban_events(c, season_id)
     except Exception as e:
         await ctx.send(f"Could not read mr_ban_picks: {repr(e)}")
         return
