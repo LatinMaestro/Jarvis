@@ -40,6 +40,7 @@ from jarvis.database.connection import (
     open_sqlite_connection,
     prepare_sqlite_db_file as _prepare_sqlite_db_file,
 )
+from jarvis.database.roster import list_enabled_roster_uids, list_roster
 from jarvis.formatting import format_duration as _fmt_time
 from jarvis.naming import (
     PREFERRED_PLAYERS,
@@ -4811,10 +4812,7 @@ async def roster_remove(ctx, player_uid: int):
 @bot.command(name="roster_list")
 async def roster_list(ctx):
     ensure_auto_import_tables()
-    c.execute(
-        "SELECT player_uid, player_name, enabled FROM mr_roster ORDER BY enabled DESC, player_uid ASC"
-    )
-    rows = c.fetchall()
+    rows = list_roster(c)
     if not rows:
         await ctx.send(
             "Roster is empty. Use `!roster_add <player_uid> [name]`.")
@@ -4833,8 +4831,7 @@ async def roster_update_all(ctx):
       !roster_update_all
     """
     ensure_auto_import_tables()
-    c.execute("SELECT player_uid FROM mr_roster WHERE enabled=1 ORDER BY player_uid ASC")
-    roster_uids = [int(r[0]) for r in c.fetchall() if r and r[0] is not None]
+    roster_uids = list_enabled_roster_uids(c)
 
     if not roster_uids:
         await ctx.send("Roster is empty (no enabled player_uid rows).")
