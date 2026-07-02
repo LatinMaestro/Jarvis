@@ -15,7 +15,6 @@ import random
 import sqlite3
 import asyncio
 import threading
-import shutil
 import aiohttp
 import math
 import traceback
@@ -36,6 +35,11 @@ from itertools import combinations
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
+from jarvis.database.connection import (
+    env_flag as _env_flag,
+    open_sqlite_connection,
+    prepare_sqlite_db_file as _prepare_sqlite_db_file,
+)
 from jarvis.formatting import format_duration as _fmt_time
 from jarvis.naming import (
     PREFERRED_PLAYERS,
@@ -77,39 +81,6 @@ DB_PATH = (os.getenv("MR_DB_PATH", "marvel_rivals_stats.db") or "marvel_rivals_s
 DB_SEED_PATH = (os.getenv("MR_DB_SEED_PATH", "marvel_rivals_stats.db") or "marvel_rivals_stats.db").strip()
 
 
-def _env_flag(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return bool(default)
-    return str(raw).strip().lower() in ("1", "true", "yes", "on", "enabled")
-
-
-def _prepare_sqlite_db_file(db_path: str, seed_path: str | None = None) -> None:
-    """Prepare SQLite path and optionally seed a persistent volume DB on first boot.
-
-    Railway volumes start empty. If MR_DB_PATH points to the volume (for example
-    /data/marvel_rivals_stats.db) and the DB does not exist yet, this copies the
-    bundled repo DB from MR_DB_SEED_PATH / marvel_rivals_stats.db into the volume.
-    """
-    target_abs = os.path.abspath(db_path)
-    target_dir = os.path.dirname(target_abs)
-    if target_dir and not os.path.exists(target_dir):
-        os.makedirs(target_dir, exist_ok=True)
-
-    if os.path.exists(target_abs):
-        return
-
-    if not seed_path:
-        return
-
-    seed_abs = os.path.abspath(seed_path)
-    if seed_abs == target_abs:
-        return
-
-    if os.path.exists(seed_abs):
-        shutil.copy2(seed_abs, target_abs)
-
-
 def _allow_command_hero_cache_refresh() -> bool:
     """Keep normal display/stat commands from making surprise hero-cache API calls."""
     return _env_flag("ENABLE_COMMAND_HERO_CACHE_REFRESH", False)
@@ -117,14 +88,7 @@ def _allow_command_hero_cache_refresh() -> bool:
 
 _prepare_sqlite_db_file(DB_PATH, DB_SEED_PATH)
 
-conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
-try:
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA busy_timeout=30000")
-except Exception:
-    pass
-c = conn.cursor()
+conn, c = open_sqlite_connection(DB_PATH)
 
 
 # =========================
