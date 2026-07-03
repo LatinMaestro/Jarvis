@@ -59,7 +59,7 @@ from jarvis.stats.low_team import (
     render_low_team_image as _render_low_team_image,
 )
 from jarvis.stats.player_bans import load_ban_events, load_human_player_matches
-from jarvis.stats.profiles import latest_player_name, list_human_players, load_accuracy_rows
+from jarvis.stats.profiles import latest_player_name, list_human_players, load_accuracy_rows, load_season_totals
 from jarvis.stats.role_winrates import load_role_segment_rows
 from jarvis.stats.seasons import (
     season_date_range as _read_season_date_range,
@@ -11901,31 +11901,7 @@ def _profile_get_season_totals(season_id: int, player_uid: int) -> dict:
     fh_col = _profile_has_column("mr_player_match", "final_hits")
     sk_col = _profile_has_column("mr_player_match", "solo_kill")
 
-    extra_cols = []
-    extra_cols.append("SUM(COALESCE(final_hits,0)) as final_hits" if fh_col else "0 as final_hits")
-    extra_cols.append("SUM(COALESCE(solo_kill,0)) as solo_kills" if sk_col else "0 as solo_kills")
-    extra_sql = ",\n            ".join(extra_cols)
-
-    c.execute(
-        f"""
-        SELECT
-            COUNT(*) as games,
-            SUM(CASE WHEN is_win=1 THEN 1 ELSE 0 END) as wins,
-            SUM(CASE WHEN is_win=0 THEN 1 ELSE 0 END) as losses,
-            SUM(kills) as kills,
-            SUM(deaths) as deaths,
-            SUM(assists) as assists,
-            SUM(total_hero_damage) as dmg,
-            SUM(total_damage_taken) as taken,
-            SUM(total_hero_heal) as heal,
-            {extra_sql}
-        FROM mr_player_match
-        WHERE season_id=? AND player_uid=? AND is_bot=0
-        """,
-        (int(season_id), int(player_uid)),
-    )
-
-    row = c.fetchone() or (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    row = load_season_totals(c, season_id, player_uid, fh_col, sk_col)
     games, wins, losses, k, d, a, dmg, taken, heal, fh, sk = row
 
     games = _safe_int(games)
