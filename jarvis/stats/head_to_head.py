@@ -43,3 +43,21 @@ def load_player_totals(cursor, season_id: int, player_uid: int, match_uids: list
         return cursor.fetchone() or (0, 0, 0, 0, 0, 0, 0, 0, 0)
     except Exception:
         return (0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+
+def load_accuracy_components(cursor, season_id: int, player_uid: int, match_uids: list[str]):
+    if not match_uids:
+        return (0, 0)
+    placeholders = ",".join("?" for _ in match_uids)
+    sql = f"""
+        SELECT SUM(CASE WHEN session_hit_rate IS NULL THEN 0 ELSE session_hit_rate * seconds END),
+               SUM(CASE WHEN session_hit_rate IS NULL THEN 0 ELSE seconds END)
+        FROM mr_hero_segments
+        WHERE season_id=? AND player_uid=? AND is_bot=0
+          AND match_uid IN ({placeholders})
+    """
+    try:
+        cursor.execute(sql, (int(season_id), int(player_uid), *[str(uid) for uid in match_uids]))
+        return cursor.fetchone() or (0, 0)
+    except Exception:
+        return (0, 0)

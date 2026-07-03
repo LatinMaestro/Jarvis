@@ -1,7 +1,7 @@
 import sqlite3
 import unittest
 
-from jarvis.stats.head_to_head import get_opponent_match_uids, load_player_totals
+from jarvis.stats.head_to_head import get_opponent_match_uids, load_accuracy_components, load_player_totals
 
 
 class HeadToHeadReadTests(unittest.TestCase):
@@ -11,6 +11,14 @@ class HeadToHeadReadTests(unittest.TestCase):
         cursor.execute("CREATE TABLE mr_player_match (season_id INTEGER, match_uid TEXT, game_label TEXT, player_uid INTEGER, is_bot INTEGER, is_win INTEGER)")
         cursor.executemany("INSERT INTO mr_player_match VALUES (?, ?, ?, ?, ?, ?)", [(7, "opp", "G1", 1, 0, 1), (7, "opp", "G1", 2, 0, 0), (7, "same", "G2", 1, 0, 1), (7, "same", "G2", 2, 0, 1), (7, "bot", "G3", 1, 0, 1), (7, "bot", "G3", 2, 1, 0)])
         self.assertEqual(get_opponent_match_uids(cursor, 7, 1, 2), ["opp"])
+        cursor.close(); connection.close()
+
+    def test_accuracy_components_weight_by_seconds(self):
+        connection = sqlite3.connect(":memory:")
+        cursor = connection.cursor()
+        cursor.execute("CREATE TABLE mr_hero_segments (season_id INTEGER, match_uid TEXT, player_uid INTEGER, is_bot INTEGER, session_hit_rate REAL, seconds REAL)")
+        cursor.executemany("INSERT INTO mr_hero_segments VALUES (?, ?, ?, ?, ?, ?)", [(7, "m1", 1, 0, 0.5, 100), (7, "m2", 1, 0, 1.0, 50), (7, "other", 1, 0, 0.0, 999), (7, "m1", 2, 0, 1.0, 100)])
+        self.assertEqual(load_accuracy_components(cursor, 7, 1, ["m1", "m2"]), (100.0, 150.0))
         cursor.close(); connection.close()
 
     def test_player_totals_are_restricted_to_requested_matches(self):

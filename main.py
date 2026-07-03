@@ -53,7 +53,7 @@ from jarvis.stats.hero_bans import get_top_hero_bans as _get_top_hero_bans
 from jarvis.stats.hero_time import get_hero_time_by_player as _get_hero_time_by_player
 from jarvis.stats.hero_roles import load_hero_cache_rows, load_season_hero_usage
 from jarvis.stats.games import get_recent_games as _get_recent_games
-from jarvis.stats.head_to_head import get_opponent_match_uids, load_player_totals
+from jarvis.stats.head_to_head import get_opponent_match_uids, load_accuracy_components, load_player_totals
 from jarvis.stats.low_team import (
     calculate_low_team_results as _calculate_low_team_results,
     render_low_team_image as _render_low_team_image,
@@ -13911,21 +13911,8 @@ def _h2h_get_accuracy_in_matches(season_id: int, player_uid: int, match_uids: li
     ensure_mr_api_tables()
     if not match_uids:
         return None
-    ph = ",".join(["?"] * len(match_uids))
-    sql = f"""
-        SELECT
-            SUM(CASE WHEN session_hit_rate IS NULL THEN 0 ELSE session_hit_rate * seconds END) as num,
-            SUM(CASE WHEN session_hit_rate IS NULL THEN 0 ELSE seconds END) as den
-        FROM mr_hero_segments
-        WHERE season_id=?
-          AND player_uid=?
-          AND is_bot=0
-          AND match_uid IN ({ph})
-    """
-    args = [int(season_id), int(player_uid)] + [str(m) for m in match_uids]
     try:
-        c.execute(sql, tuple(args))
-        r = c.fetchone() or (0, 0)
+        r = load_accuracy_components(c, season_id, player_uid, match_uids)
         num = _h2h_safe_float(r[0], 0.0)
         den = _h2h_safe_float(r[1], 0.0)
         return (num / den) if den > 0 else None
