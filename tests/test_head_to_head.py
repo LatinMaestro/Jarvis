@@ -1,7 +1,7 @@
 import sqlite3
 import unittest
 
-from jarvis.stats.head_to_head import get_opponent_match_uids, load_accuracy_components, load_player_totals, load_total_seconds
+from jarvis.stats.head_to_head import get_opponent_match_uids, load_accuracy_components, load_distinct_hero_count, load_player_totals, load_total_seconds
 
 
 class HeadToHeadReadTests(unittest.TestCase):
@@ -27,6 +27,14 @@ class HeadToHeadReadTests(unittest.TestCase):
         cursor.execute("CREATE TABLE mr_hero_segments (season_id INTEGER, match_uid TEXT, player_uid INTEGER, is_bot INTEGER, seconds REAL)")
         cursor.executemany("INSERT INTO mr_hero_segments VALUES (?, ?, ?, ?, ?)", [(7, "m1", 1, 0, 100), (7, "m2", 1, 0, 50), (7, "other", 1, 0, 999), (7, "m1", 2, 0, 999)])
         self.assertEqual(load_total_seconds(cursor, 7, 1, ["m1", "m2"]), 150.0)
+        cursor.close(); connection.close()
+
+    def test_distinct_hero_pool_is_restricted_to_matches(self):
+        connection = sqlite3.connect(":memory:")
+        cursor = connection.cursor()
+        cursor.execute("CREATE TABLE mr_hero_segments (season_id INTEGER, match_uid TEXT, player_uid INTEGER, is_bot INTEGER, hero_id INTEGER)")
+        cursor.executemany("INSERT INTO mr_hero_segments VALUES (?, ?, ?, ?, ?)", [(7, "m1", 1, 0, 101), (7, "m2", 1, 0, 101), (7, "m2", 1, 0, 202), (7, "other", 1, 0, 303), (7, "m1", 2, 0, 404)])
+        self.assertEqual(load_distinct_hero_count(cursor, 7, 1, ["m1", "m2"]), 2)
         cursor.close(); connection.close()
 
     def test_player_totals_are_restricted_to_requested_matches(self):

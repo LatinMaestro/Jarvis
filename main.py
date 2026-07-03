@@ -53,7 +53,7 @@ from jarvis.stats.hero_bans import get_top_hero_bans as _get_top_hero_bans
 from jarvis.stats.hero_time import get_hero_time_by_player as _get_hero_time_by_player
 from jarvis.stats.hero_roles import load_hero_cache_rows, load_hero_name_rows, load_season_hero_usage
 from jarvis.stats.games import get_recent_games as _get_recent_games
-from jarvis.stats.head_to_head import get_opponent_match_uids, load_accuracy_components, load_player_totals, load_total_seconds
+from jarvis.stats.head_to_head import get_opponent_match_uids, load_accuracy_components, load_distinct_hero_count, load_player_totals, load_total_seconds
 from jarvis.stats.low_team import (
     calculate_low_team_results as _calculate_low_team_results,
     render_low_team_image as _render_low_team_image,
@@ -13896,22 +13896,7 @@ def _h2h_get_hero_pool_in_matches(season_id: int, player_uid: int, match_uids: l
     ensure_mr_api_tables()
     if not match_uids:
         return 0
-    ph = ",".join(["?"] * len(match_uids))
-    sql = f"""
-        SELECT COUNT(DISTINCT hero_id)
-        FROM mr_hero_segments
-        WHERE season_id=?
-          AND player_uid=?
-          AND is_bot=0
-          AND match_uid IN ({ph})
-    """
-    args = [int(season_id), int(player_uid)] + [str(m) for m in match_uids]
-    try:
-        c.execute(sql, tuple(args))
-        r = c.fetchone()
-        return _h2h_safe_int((r[0] if r else 0), 0)
-    except Exception:
-        return 0
+    return _h2h_safe_int(load_distinct_hero_count(c, season_id, player_uid, match_uids), 0)
 
 
 def _h2h_get_mvp_svp(season_id: int, player_uid: int, match_uids: list[str] | None = None) -> tuple[int, int]:
