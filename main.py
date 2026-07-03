@@ -11855,12 +11855,9 @@ def _profile_load_hero_roles() -> dict[int, str]:
 
     out: dict[int, str] = {}
     try:
-        c.execute("""
-            SELECT hero_id, hero_role
-            FROM hero_cache
-            WHERE hero_role IS NOT NULL AND TRIM(hero_role) <> ''
-        """)
-        for hid, role in c.fetchall() or []:
+        for hid, _hero_name, role in load_hero_cache_rows(c):
+            if role is None or not str(role).strip():
+                continue
             hid_s = str(hid or "").strip()
             hid_digits = _digits_only(hid_s) or hid_s
             try:
