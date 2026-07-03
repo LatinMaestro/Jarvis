@@ -65,6 +65,18 @@ from jarvis.stats.player_bans import (
     render_player_bans_image,
 )
 from jarvis.stats.profiles import latest_player_name, list_human_players, load_accuracy_rows, load_season_totals
+from jarvis.stats.profile_analytics import (
+    build_snapshot_rows as _profile_build_snapshot_rows,
+    collect_hero_ids as _profile_collect_hero_ids,
+    current_streak as _profile_current_streak,
+    form_string as _profile_form_str,
+    normalise_side as _profile_norm_side,
+    percentile as _profile_percentile,
+    pick_best_role as _profile_pick_best_role,
+    role_bucket as _profile_role_bucket,
+    signature_heroes as _profile_signature_heroes_by_performance,
+    streak_text as _profile_streak_txt,
+)
 from jarvis.stats.role_winrates import load_role_segment_rows
 from jarvis.stats.seasons import (
     season_date_range as _read_season_date_range,
@@ -11512,58 +11524,6 @@ def _get_player_display_name(season_id: int, player_uid: int) -> str:
 # ------------------------------------------------------------------------------------------------------------
 # Core calculations
 # ------------------------------------------------------------------------------------------------------------
-def _profile_norm_side(v):
-    """
-    Normalise side/team values into 0/1.
-    Accepts 0/1 or 1/2.
-    """
-    try:
-        i = int(v)
-    except Exception:
-        return None
-    if i in (0, 1):
-        return i
-    if i in (1, 2):
-        return i - 1
-    return None
-
-
-def _profile_percentile(values: list[float],
-                        my_value: float,
-                        *,
-                        higher_is_better: bool = True) -> Optional[float]:
-    vals = [
-        float(v) for v in values
-        if v is not None and not (isinstance(v, float) and math.isnan(v))
-    ]
-    if not vals:
-        return None
-
-    if not higher_is_better:
-        vals = [-v for v in vals]
-        my = -float(my_value)
-    else:
-        my = float(my_value)
-
-    below = sum(1 for v in vals if v < my)
-    equal = sum(1 for v in vals if v == my)
-    n = len(vals)
-    return 100.0 * (below + 0.5 * equal) / n
-
-
-def _profile_role_bucket(role_str: str) -> Optional[str]:
-    rs = (role_str or "").strip().lower()
-    if not rs:
-        return None
-    if "vanguard" in rs:
-        return "Vanguard"
-    if "duelist" in rs:
-        return "Duelist"
-    if "strateg" in rs:
-        return "Strategist"
-    return None
-
-
 def _profile_load_hero_roles() -> dict[int, str]:
     """
     Returns {hero_id_int: role_str} from hero_cache.hero_role.
@@ -11755,33 +11715,6 @@ def _profile_get_win_seq_by_import_time(season_id: int, player_uid: int) -> list
     return [1 if _safe_int(r[0]) == 1 else 0 for r in c.fetchall()]
 
 
-def _profile_form_str(seq: list[int], n: int) -> str:
-    if len(seq) < n:
-        return "N/A"
-    s = seq[-n:]
-    return "".join("W" if x == 1 else "L" for x in s)
-
-
-def _profile_current_streak(seq: list[int]) -> int:
-    if not seq:
-        return 0
-    streak_type = seq[-1]
-    run = 0
-    for w in reversed(seq):
-        if w != streak_type:
-            break
-        run += 1
-    return run if streak_type == 1 else -run
-
-
-def _profile_streak_txt(streak: int) -> str:
-    if streak > 0:
-        return f"{streak}W"
-    if streak < 0:
-        return f"{abs(streak)}L"
-    return "0"
-
-
 def _profile_get_momentum_last_n(season_id: int, player_uid: int, n: int = 10) -> dict:
     """
     Last-N win%, deaths/g, final-hits/g from match_imports ordering.
@@ -11954,47 +11887,6 @@ def _profile_get_role_mix_and_role_wr(
         d["win_pct"] = (d["wins"] / g * 100.0) if g else 0.0
 
     return share, role_wr
-
-
-def _profile_pick_best_role(role_wr: dict[str, dict], *, min_games: int = 4) -> Optional[dict]:
-    cand = []
-    for role, d in role_wr.items():
-        g = int(d.get("games", 0) or 0)
-        if g < min_games:
-            continue
-        cand.append({
-            "role": role,
-            "games": g,
-            "win_pct": float(d.get("win_pct", 0.0) or 0.0),
-        })
-    if not cand:
-        return None
-    cand.sort(key=lambda x: (x["win_pct"], x["games"]), reverse=True)
-    return cand[0]
-
-
-def _profile_signature_heroes_by_performance(
-    hero_stats: list[dict],
-    *,
-    min_games: int = 5,
-    limit: int = 5,
-) -> list[dict]:
-    """
-    Signature heroes ranked by PERFORMANCE (win%),
-    only including heroes with >= min_games.
-    """
-    elig = [h for h in hero_stats if int(h.get("games", 0) or 0) >= min_games]
-    if not elig:
-        return []
-    elig.sort(
-        key=lambda x: (
-            float(x.get("win_pct", 0.0) or 0.0),
-            int(x.get("games", 0) or 0),
-            int(x.get("seconds", 0) or 0),
-        ),
-        reverse=True,
-    )
-    return elig[:limit]
 
 
 def _profile_get_chemistry(season_id: int, player_uid: int, *, min_games: int = 4) -> dict:
@@ -12625,58 +12517,6 @@ def _render_profile_dashboard(player_name: str, pack: dict) -> io.BytesIO:
 # ------------------------------------------------------------------------------------------------------------
 # Snapshot rows builder (no bars)
 # ------------------------------------------------------------------------------------------------------------
-def _profile_build_snapshot_rows(all_metrics: dict[int, dict], my: dict, *, enable_pct: bool) -> list[dict]:
-    win_list = [v["win_pct"] for v in all_metrics.values()]
-    kda_list = [v["kda"] for v in all_metrics.values()]
-    dpg_list = [v["deaths_pg"] for v in all_metrics.values()]
-    dmg_list = [v["dmg_pg"] for v in all_metrics.values()]
-    heal_list = [v["heal_pg"] for v in all_metrics.values()]
-    taken_list = [v["taken_pg"] for v in all_metrics.values()]
-    fh_list = [v["fh_pg"] for v in all_metrics.values()]
-    sk_list = [v["sk_pg"] for v in all_metrics.values()]
-    acc_list = [v["acc"] for v in all_metrics.values() if v.get("acc") is not None]
-
-    def pct(lst, value, hib=True):
-        if not enable_pct:
-            return None
-        return _profile_percentile(lst, value, higher_is_better=hib)
-
-    rows = [
-        {"label": "Win %", "value_txt": f"{my['win_pct']:.1f}%", "pct": pct(win_list, my["win_pct"], True)},
-        {"label": "KDA", "value_txt": f"{my['kda']:.2f}", "pct": pct(kda_list, my["kda"], True)},
-        {"label": "Deaths / G", "value_txt": f"{my['deaths_pg']:.2f}", "pct": pct(dpg_list, my["deaths_pg"], False)},
-        {"label": "Damage / G", "value_txt": f"{my['dmg_pg']:.0f}", "pct": pct(dmg_list, my["dmg_pg"], True)},
-        {"label": "Healing / G", "value_txt": f"{my['heal_pg']:.0f}", "pct": pct(heal_list, my["heal_pg"], True)},
-        {"label": "Taken / G", "value_txt": f"{my['taken_pg']:.0f}", "pct": pct(taken_list, my["taken_pg"], True)},
-        {"label": "Final Hits / G", "value_txt": f"{my['fh_pg']:.2f}", "pct": pct(fh_list, my["fh_pg"], True)},
-        {"label": "Solo Kills / G", "value_txt": f"{my['sk_pg']:.2f}", "pct": pct(sk_list, my["sk_pg"], True)},
-    ]
-
-    if my.get("acc") is None or not acc_list:
-        rows.append({"label": "Accuracy", "value_txt": "—", "pct": None})
-    else:
-        rows.append({
-            "label": "Accuracy",
-            "value_txt": f"{my['acc']*100:.1f}%",
-            "pct": pct(acc_list, my["acc"], True),
-        })
-
-    return rows
-
-
-def _profile_collect_hero_ids(pack: dict) -> set[int]:
-    ids = set()
-    for h in pack.get("signature_heroes", []):
-        ids.add(int(h["hero_id"]))
-    for b in pack.get("enemy_bans", {}).get("top", []):
-        ids.add(int(b["hero_id"]))
-    for h in pack.get("teammate_hero_win", []):
-        ids.add(int(h["hero_id"]))
-    for h in pack.get("teammate_hero_risk", []):
-        ids.add(int(h["hero_id"]))
-    return ids
-
-
 def _profile_pack_sync(season_id: int, player_uid: int) -> dict:
     totals = _profile_get_season_totals(season_id, player_uid)
 
