@@ -65,7 +65,7 @@ from jarvis.stats.player_bans import (
     load_human_player_matches,
     render_player_bans_image,
 )
-from jarvis.stats.profiles import latest_player_name, list_human_players, load_accuracy_rows, load_season_totals
+from jarvis.stats.profiles import latest_player_name, list_human_players
 from jarvis.stats.profile_analytics import (
     build_snapshot_rows as _profile_build_snapshot_rows,
     collect_hero_ids as _profile_collect_hero_ids,
@@ -77,6 +77,19 @@ from jarvis.stats.profile_analytics import (
     role_bucket as _profile_role_bucket,
     signature_heroes as _profile_signature_heroes_by_performance,
     streak_text as _profile_streak_txt,
+)
+from jarvis.stats.profile_data import (
+    get_accuracy_by_player as _profile_get_accuracy_by_player,
+    get_all_player_metrics as _profile_get_all_player_metrics,
+    get_chemistry as _profile_get_chemistry,
+    get_enemy_bans as _profile_get_enemy_bans,
+    get_hero_stats as _profile_get_hero_stats,
+    get_momentum_last_n as _profile_get_momentum_last_n,
+    get_role_mix_and_role_wr as _profile_get_role_mix_and_role_wr,
+    get_season_totals as _profile_get_season_totals,
+    get_teammate_hero_wr_lists as _profile_get_teammate_hero_wr_lists,
+    get_win_seq_by_import_time as _profile_get_win_seq_by_import_time,
+    load_hero_roles as _profile_load_hero_roles,
 )
 from jarvis.stats.role_winrates import load_role_segment_rows
 from jarvis.stats.seasons import (
@@ -11454,11 +11467,6 @@ async def four_v_four_records(ctx):
 #   get_hero_name, refresh_hero_cache, _fmt_time, _digits_only
 # ============================================================================================================
 
-def _kda(k: float, d: float, a: float) -> float:
-    d = max(1.0, float(d))
-    return (float(k) + float(a)) / d
-
-
 def _safe_int(x, default=0) -> int:
     try:
         return int(x)
@@ -11471,14 +11479,6 @@ def _safe_float(x, default=0.0) -> float:
         return float(x)
     except Exception:
         return default
-
-
-def _profile_has_column(table: str, col: str) -> bool:
-    try:
-        c.execute(f"PRAGMA table_info({table})")
-        return any(str(r[1]).lower() == col.lower() for r in c.fetchall())
-    except Exception:
-        return False
 
 
 # ------------------------------------------------------------------------------------------------------------
@@ -11522,694 +11522,13 @@ def _get_player_display_name(season_id: int, player_uid: int) -> str:
     return latest_player_name(c, season_id, player_uid)
 
 
-# ------------------------------------------------------------------------------------------------------------
-# Core calculations
-# ------------------------------------------------------------------------------------------------------------
-def _profile_load_hero_roles() -> dict[int, str]:
-    """
-    Returns {hero_id_int: role_str} from hero_cache.hero_role.
-    Safe if hero_cache missing or hero_role not populated.
-    """
-    ensure_mr_api_tables()
-    if not _profile_has_column("hero_cache", "hero_role"):
-        return {}
-
-    out: dict[int, str] = {}
-    try:
-        for hid, _hero_name, role in load_hero_cache_rows(c):
-            if role is None or not str(role).strip():
-                continue
-            hid_s = str(hid or "").strip()
-            hid_digits = _digits_only(hid_s) or hid_s
-            try:
-                hi = int(hid_digits)
-            except Exception:
-                continue
-            rs = str(role or "").strip()
-            if rs:
-                out[hi] = rs
-    except Exception:
-        return {}
-
-    return out
-
-
-def _profile_get_accuracy_by_player(season_id: int) -> dict[int, float]:
-    """
-    Weighted accuracy by seconds where session_hit_rate exists.
-    """
-    ensure_mr_api_tables()
-    out: dict[int, float] = {}
-    try:
-        for uid, hit_sum, sec_sum in load_accuracy_rows(c, season_id):
-            uid_i = _safe_int(uid)
-            sec = float(_safe_float(sec_sum))
-            if uid_i <= 0 or sec <= 0.0:
-                continue
-            out[uid_i] = float(_safe_float(hit_sum)) / sec
-    except Exception:
-        return {}
-    return out
-
-
-def _profile_get_season_totals(season_id: int, player_uid: int) -> dict:
-    """
-    Player season totals + per-game derived metrics.
-    Includes FH/SK if columns exist.
-    """
-    ensure_mr_api_tables()
-
-    fh_col = _profile_has_column("mr_player_match", "final_hits")
-    sk_col = _profile_has_column("mr_player_match", "solo_kill")
-
-    row = load_season_totals(c, season_id, player_uid, fh_col, sk_col)
-    games, wins, losses, k, d, a, dmg, taken, heal, fh, sk = row
-
-    games = _safe_int(games)
-    wins = _safe_int(wins)
-    losses = _safe_int(losses)
-    k = _safe_int(k)
-    d = _safe_int(d)
-    a = _safe_int(a)
-    dmg = float(_safe_float(dmg))
-    taken = float(_safe_float(taken))
-    heal = float(_safe_float(heal))
-    fh = _safe_int(fh)
-    sk = _safe_int(sk)
-
-    win_pct = (wins / games * 100.0) if games > 0 else 0.0
-
-    return {
-        "games": games,
-        "wins": wins,
-        "losses": losses,
-        "win_pct": win_pct,
-        "kills": k,
-        "deaths": d,
-        "assists": a,
-        "dmg": dmg,
-        "taken": taken,
-        "heal": heal,
-        "final_hits": fh,
-        "solo_kills": sk,
-        "kda": _kda(k, d, a),
-        "dmg_pg": (dmg / games) if games else 0.0,
-        "heal_pg": (heal / games) if games else 0.0,
-        "taken_pg": (taken / games) if games else 0.0,
-        "deaths_pg": (d / games) if games else 0.0,
-        "fh_pg": (fh / games) if games else 0.0,
-        "sk_pg": (sk / games) if games else 0.0,
-    }
-
-
-def _profile_get_all_player_metrics(season_id: int, *, min_games: int = 5) -> dict[int, dict]:
-    """
-    Per-player baseline metrics for percentile calculations.
-    Filters to humans with >= min_games.
-    """
-    ensure_mr_api_tables()
-
-    fh_col = _profile_has_column("mr_player_match", "final_hits")
-    sk_col = _profile_has_column("mr_player_match", "solo_kill")
-
-    extra_cols = []
-    extra_cols.append("SUM(COALESCE(final_hits,0)) as final_hits" if fh_col else "0 as final_hits")
-    extra_cols.append("SUM(COALESCE(solo_kill,0)) as solo_kills" if sk_col else "0 as solo_kills")
-    extra_sql = ",\n            ".join(extra_cols)
-
-    c.execute(
-        f"""
-        SELECT
-            player_uid,
-            COUNT(*) as games,
-            SUM(CASE WHEN is_win=1 THEN 1 ELSE 0 END) as wins,
-            SUM(kills) as kills,
-            SUM(deaths) as deaths,
-            SUM(assists) as assists,
-            SUM(total_hero_damage) as dmg,
-            SUM(total_hero_heal) as heal,
-            SUM(total_damage_taken) as taken,
-            {extra_sql}
-        FROM mr_player_match
-        WHERE season_id=? AND COALESCE(is_bot,0)=0
-        GROUP BY player_uid
-        """,
-        (int(season_id),),
-    )
-
-    acc_map = _profile_get_accuracy_by_player(season_id)
-
-    out: dict[int, dict] = {}
-    for row in c.fetchall() or []:
-        uid, games, wins, k, d, a, dmg, heal, taken, fh, sk = row
-        uid_i = _safe_int(uid)
-        g = _safe_int(games)
-        if uid_i <= 0 or g < min_games:
-            continue
-
-        w = _safe_int(wins)
-        k = _safe_int(k)
-        d = _safe_int(d)
-        a = _safe_int(a)
-        dmg = float(_safe_float(dmg))
-        heal = float(_safe_float(heal))
-        taken = float(_safe_float(taken))
-        fh = _safe_int(fh)
-        sk = _safe_int(sk)
-
-        out[uid_i] = {
-            "games": g,
-            "win_pct": (w / g * 100.0) if g else 0.0,
-            "kda": _kda(k, d, a),
-            "deaths_pg": (d / g) if g else 0.0,
-            "dmg_pg": (dmg / g) if g else 0.0,
-            "heal_pg": (heal / g) if g else 0.0,
-            "taken_pg": (taken / g) if g else 0.0,
-            "fh_pg": (fh / g) if g else 0.0,
-            "sk_pg": (sk / g) if g else 0.0,
-            "acc": acc_map.get(uid_i),
-        }
-
-    return out
-
-
-def _profile_get_win_seq_by_import_time(season_id: int, player_uid: int) -> list[int]:
-    """
-    Uses match_imports.imported_at as match ordering.
-    """
-    ensure_mr_api_tables()
-    c.execute(
-        """
-        SELECT pm.is_win
-        FROM match_imports mi
-        JOIN mr_player_match pm
-          ON pm.season_id=mi.season_id
-         AND pm.match_uid=mi.match_uid
-         AND pm.game_label=mi.game_label
-        WHERE mi.season_id=?
-          AND pm.player_uid=?
-          AND COALESCE(pm.is_bot,0)=0
-        ORDER BY datetime(mi.imported_at) ASC
-    """,
-        (int(season_id), int(player_uid)),
-    )
-    return [1 if _safe_int(r[0]) == 1 else 0 for r in c.fetchall()]
-
-
-def _profile_get_momentum_last_n(season_id: int, player_uid: int, n: int = 10) -> dict:
-    """
-    Last-N win%, deaths/g, final-hits/g from match_imports ordering.
-    """
-    ensure_mr_api_tables()
-
-    fh_col = _profile_has_column("mr_player_match", "final_hits")
-    sel_fh = "COALESCE(pm.final_hits,0)" if fh_col else "0"
-
-    c.execute(
-        f"""
-        SELECT pm.is_win, pm.deaths, {sel_fh} as final_hits
-        FROM match_imports mi
-        JOIN mr_player_match pm
-          ON pm.season_id=mi.season_id
-         AND pm.match_uid=mi.match_uid
-         AND pm.game_label=mi.game_label
-        WHERE mi.season_id=?
-          AND pm.player_uid=?
-          AND COALESCE(pm.is_bot,0)=0
-        ORDER BY datetime(mi.imported_at) DESC
-        LIMIT ?
-    """,
-        (int(season_id), int(player_uid), int(n)),
-    )
-
-    rows = c.fetchall() or []
-    g = len(rows)
-    if g <= 0:
-        return {"games": 0, "win_pct": 0.0, "deaths_pg": 0.0, "fh_pg": 0.0}
-
-    wins = sum(1 for w, _d, _fh in rows if _safe_int(w) == 1)
-    deaths = sum(_safe_int(_d) for _w, _d, _fh in rows)
-    fhs = sum(_safe_int(_fh) for _w, _d, _fh in rows)
-
-    return {
-        "games": g,
-        "win_pct": (wins / g * 100.0),
-        "deaths_pg": (deaths / g),
-        "fh_pg": (fhs / g),
-    }
-
-
-def _profile_get_hero_stats(season_id: int, player_uid: int) -> list[dict]:
-    """
-    Aggregated per-hero stats (time, games, win%, KDA, FH/G).
-    """
-    ensure_mr_api_tables()
-
-    fh_col = _profile_has_column("mr_hero_segments", "final_hits")
-    sel_fh = "SUM(COALESCE(hs.final_hits,0))" if fh_col else "0"
-
-    c.execute(
-        f"""
-        SELECT
-            hs.hero_id,
-            SUM(COALESCE(hs.seconds,0)) AS sec,
-            COUNT(DISTINCT hs.match_uid) AS games,
-            SUM(CASE WHEN pm.is_win=1 THEN 1 ELSE 0 END) AS wins,
-            SUM(COALESCE(hs.kills,0)) AS k,
-            SUM(COALESCE(hs.deaths,0)) AS d,
-            SUM(COALESCE(hs.assists,0)) AS a,
-            AVG(CASE WHEN hs.session_hit_rate IS NULL THEN NULL ELSE hs.session_hit_rate END) AS acc,
-            {sel_fh} AS final_hits
-        FROM mr_hero_segments hs
-        JOIN mr_player_match pm
-          ON pm.season_id=hs.season_id
-         AND pm.match_uid=hs.match_uid
-         AND pm.player_uid=hs.player_uid
-        WHERE hs.season_id=?
-          AND hs.player_uid=?
-          AND COALESCE(hs.is_bot,0)=0
-        GROUP BY hs.hero_id
-        ORDER BY sec DESC
-    """,
-        (int(season_id), int(player_uid)),
-    )
-
-    out = []
-    for hid, sec, games, wins, k, d, a, acc, fh in c.fetchall() or []:
-        g = _safe_int(games)
-        w = _safe_int(wins)
-        fh_i = _safe_int(fh)
-        out.append({
-            "hero_id": _safe_int(hid),
-            "seconds": int(_safe_float(sec)),
-            "games": g,
-            "wins": w,
-            "win_pct": (w / g * 100.0) if g else 0.0,
-            "k": _safe_int(k),
-            "d": _safe_int(d),
-            "a": _safe_int(a),
-            "kda": _kda(_safe_int(k), _safe_int(d), _safe_int(a)),
-            "acc": (float(acc) if acc is not None else None),
-            "final_hits": fh_i,
-            "fh_pg": (fh_i / g) if g else 0.0,
-        })
-    return out
-
-
-def _profile_get_role_mix_and_role_wr(
-    season_id: int,
-    player_uid: int,
-    role_map: dict[int, str],
-) -> tuple[dict[str, float], dict[str, dict]]:
-    """
-    Role seconds share + role winrate by PRIMARY hero per match (max seconds).
-    """
-    ensure_mr_api_tables()
-
-    # Seconds share
-    c.execute(
-        """
-        SELECT hero_id, SUM(COALESCE(seconds,0)) AS sec
-        FROM mr_hero_segments
-        WHERE season_id=? AND player_uid=? AND COALESCE(is_bot,0)=0
-        GROUP BY hero_id
-    """,
-        (int(season_id), int(player_uid)),
-    )
-    secs_by_role = {"Vanguard": 0.0, "Duelist": 0.0, "Strategist": 0.0}
-    total_sec = 0.0
-    for hid, sec in c.fetchall() or []:
-        hi = _safe_int(hid)
-        s = float(_safe_float(sec))
-        total_sec += s
-        rb = _profile_role_bucket(role_map.get(hi) or "")
-        if rb in secs_by_role:
-            secs_by_role[rb] += s
-
-    share = {k: (v / total_sec) if total_sec > 0 else 0.0 for k, v in secs_by_role.items()}
-
-    # Primary hero role per match -> role WR
-    c.execute(
-        """
-        SELECT hs.match_uid, hs.hero_id, COALESCE(hs.seconds,0) AS sec, pm.is_win
-        FROM mr_hero_segments hs
-        JOIN mr_player_match pm
-          ON pm.season_id=hs.season_id
-         AND pm.match_uid=hs.match_uid
-         AND pm.player_uid=hs.player_uid
-        WHERE hs.season_id=? AND hs.player_uid=? AND COALESCE(hs.is_bot,0)=0
-    """,
-        (int(season_id), int(player_uid)),
-    )
-
-    best_by_match: dict[str, tuple[int, float, int]] = {}  # mid -> (hero_id, sec, is_win)
-    for mid, hid, sec, is_win in c.fetchall() or []:
-        mid_s = str(mid or "")
-        hi = _safe_int(hid)
-        s = float(_safe_float(sec))
-        w = 1 if _safe_int(is_win) == 1 else 0
-        prev = best_by_match.get(mid_s)
-        if prev is None or s > prev[1]:
-            best_by_match[mid_s] = (hi, s, w)
-
-    role_wr = {
-        "Vanguard": {"games": 0, "wins": 0},
-        "Duelist": {"games": 0, "wins": 0},
-        "Strategist": {"games": 0, "wins": 0},
-    }
-    for hi, _s, w in best_by_match.values():
-        rb = _profile_role_bucket(role_map.get(hi) or "")
-        if rb in role_wr:
-            role_wr[rb]["games"] += 1
-            role_wr[rb]["wins"] += int(w)
-
-    for rb, d in role_wr.items():
-        g = d["games"]
-        d["win_pct"] = (d["wins"] / g * 100.0) if g else 0.0
-
-    return share, role_wr
-
-
-def _profile_get_chemistry(season_id: int, player_uid: int, *, min_games: int = 4) -> dict:
-    """
-    Best allies / worst pairings / under-used synergy (NO Δpp deltas).
-    Uses camp + match_uid to identify allies.
-    """
-    ensure_mr_api_tables()
-
-    c.execute(
-        """
-        SELECT match_uid, camp, is_win
-        FROM mr_player_match
-        WHERE season_id=? AND player_uid=? AND COALESCE(is_bot,0)=0
-          AND match_uid IS NOT NULL
-    """,
-        (int(season_id), int(player_uid)),
-    )
-    rows = c.fetchall() or []
-    mids = []
-    side_by_mid: dict[str, int] = {}
-    win_by_mid: dict[str, int] = {}
-    for mid, camp, is_win in rows:
-        mid_s = str(mid or "")
-        s = _profile_norm_side(camp)
-        if not mid_s or s is None:
-            continue
-        mids.append(mid_s)
-        side_by_mid[mid_s] = s
-        win_by_mid[mid_s] = 1 if _safe_int(is_win) == 1 else 0
-
-    if not mids:
-        return {"best": [], "worst": [], "underused": None, "baseline": 0.0, "eligible_games": 0}
-
-    ally_stats: dict[int, dict] = defaultdict(lambda: {"games": 0, "wins": 0, "name": ""})
-
-    CHUNK = 900
-    for i in range(0, len(mids), CHUNK):
-        chunk = mids[i:i + CHUNK]
-        q_marks = ",".join("?" for _ in chunk)
-        c.execute(
-            f"""
-            SELECT match_uid, player_uid, player, camp
-            FROM mr_player_match
-            WHERE season_id=?
-              AND COALESCE(is_bot,0)=0
-              AND match_uid IN ({q_marks})
-        """,
-            (int(season_id), *chunk),
-        )
-        for mid, uid, name, camp in c.fetchall() or []:
-            mid_s = str(mid or "")
-            if not mid_s or mid_s not in side_by_mid:
-                continue
-            uid_i = _safe_int(uid)
-            if uid_i <= 0 or uid_i == int(player_uid):
-                continue
-            s = _profile_norm_side(camp)
-            if s is None:
-                continue
-            if s != side_by_mid[mid_s]:
-                continue  # enemy
-
-            ally_stats[uid_i]["games"] += 1
-            ally_stats[uid_i]["wins"] += int(win_by_mid.get(mid_s, 0))
-            ally_stats[uid_i]["name"] = str(name or f"UID_{uid_i}")
-
-    allies = []
-    for uid_i, d in ally_stats.items():
-        g = int(d["games"])
-        if g <= 0:
-            continue
-        w = int(d["wins"])
-        allies.append({
-            "player_uid": uid_i,
-            "player": d["name"],
-            "games": g,
-            "wins": w,
-            "win_pct": (w / g * 100.0) if g else 0.0,
-        })
-
-    g0 = len(win_by_mid)
-    w0 = sum(win_by_mid.values())
-    baseline = (w0 / g0 * 100.0) if g0 else 0.0
-
-    eligible = [a for a in allies if a["games"] >= min_games]
-    eligible.sort(key=lambda x: (x["win_pct"], x["games"]), reverse=True)
-    best = eligible[:3]
-
-    eligible_w = [a for a in allies if a["games"] >= min_games]
-    eligible_w.sort(key=lambda x: (x["win_pct"], -x["games"]))
-    worst = eligible_w[:3]
-
-    under = None
-    cand = [a for a in allies if 2 <= a["games"] <= max(min_games - 1, 3)]
-    cand.sort(key=lambda x: (x["win_pct"], x["games"]), reverse=True)
-    if cand and cand[0]["win_pct"] >= max(baseline + 10.0, 60.0):
-        under = cand[0]
-
-    return {
-        "best": best,
-        "worst": worst,
-        "underused": under,
-        "baseline": baseline,
-        "eligible_games": g0,
-    }
-
-
-def _profile_get_enemy_bans(season_id: int, player_uid: int) -> dict:
-    """
-    Top enemy bans against player (requires camp + mr_ban_picks).
-    """
-    ensure_mr_api_tables()
-
-    c.execute(
-        """
-        SELECT match_uid, camp
-        FROM mr_player_match
-        WHERE season_id=? AND player_uid=? AND COALESCE(is_bot,0)=0
-          AND match_uid IS NOT NULL
-    """,
-        (int(season_id), int(player_uid)),
-    )
-    mids = []
-    side_by_mid = {}
-    for mid, camp in c.fetchall() or []:
-        mid_s = str(mid or "")
-        s = _profile_norm_side(camp)
-        if not mid_s or s is None:
-            continue
-        mids.append(mid_s)
-        side_by_mid[mid_s] = s
-
-    if not mids:
-        return {"games": 0, "top": []}
-
-    bans_by_mid_side: dict[str, dict[int, list[int]]] = defaultdict(lambda: {0: [], 1: []})
-
-    CHUNK = 900
-    for i in range(0, len(mids), CHUNK):
-        chunk = mids[i:i + CHUNK]
-        q_marks = ",".join("?" for _ in chunk)
-        c.execute(
-            f"""
-            SELECT match_uid, battle_side, hero_id
-            FROM mr_ban_picks
-            WHERE season_id=?
-              AND is_pick=0
-              AND hero_id IS NOT NULL
-              AND match_uid IN ({q_marks})
-        """,
-            (int(season_id), *chunk),
-        )
-        for mid, bside, hid in c.fetchall() or []:
-            mid_s = str(mid or "")
-            s = _profile_norm_side(bside)
-            hi = _safe_int(hid)
-            if not mid_s or s is None or hi <= 0:
-                continue
-            bans_by_mid_side[mid_s][s].append(hi)
-
-    eligible_mids = [mid for mid in mids if mid in bans_by_mid_side]
-    games = len(eligible_mids)
-    if games <= 0:
-        return {"games": 0, "top": []}
-
-    counter = Counter()
-    for mid in eligible_mids:
-        s = side_by_mid.get(mid)
-        if s not in (0, 1):
-            continue
-        enemy = 1 - s
-        for hid in bans_by_mid_side[mid].get(enemy, []) or []:
-            counter[hid] += 1
-
-    top = []
-    for hid, cnt in counter.most_common(5):
-        top.append({
-            "hero_id": int(hid),
-            "count": int(cnt),
-            "pct": (cnt / games * 100.0),
-        })
-
-    return {"games": games, "top": top}
-
-
-def _profile_get_teammate_hero_wr_lists(
-    season_id: int,
-    player_uid: int,
-    *,
-    min_games: int = 5,
-    top_n: int = 3,
-) -> tuple[list[dict], list[dict]]:
-    """
-    TEAMMATE HERO win/avoid lists (heroes, not players):
-      - For each match the player was in, find each teammate's PRIMARY hero (max seconds)
-      - Treat teammate primary heroes as "present" in that match
-      - Compute WR for each teammate hero across matches
-    Returns: (best_list, worst_list) with {hero_id, games, wins, win_pct}
-    """
-    ensure_mr_api_tables()
-
-    c.execute(
-        """
-        SELECT match_uid, camp, is_win
-        FROM mr_player_match
-        WHERE season_id=? AND player_uid=? AND COALESCE(is_bot,0)=0
-          AND match_uid IS NOT NULL
-        """,
-        (int(season_id), int(player_uid)),
-    )
-    rows = c.fetchall() or []
-    if not rows:
-        return [], []
-
-    mids: list[str] = []
-    side_by_mid: dict[str, int] = {}
-    win_by_mid: dict[str, int] = {}
-    for mid, camp, is_win in rows:
-        mid_s = str(mid or "")
-        s = _profile_norm_side(camp)
-        if not mid_s or s is None:
-            continue
-        mids.append(mid_s)
-        side_by_mid[mid_s] = s
-        win_by_mid[mid_s] = 1 if _safe_int(is_win) == 1 else 0
-
-    if not mids:
-        return [], []
-
-    # For each (match, teammate) pick primary hero by seconds
-    best_by_pair: dict[tuple[str, int], tuple[int, float]] = {}
-
-    CHUNK = 900
-    for i in range(0, len(mids), CHUNK):
-        chunk = mids[i:i + CHUNK]
-        q_marks = ",".join("?" for _ in chunk)
-        c.execute(
-            f"""
-            SELECT pm.match_uid, pm.player_uid, pm.camp, hs.hero_id, COALESCE(hs.seconds,0) AS sec
-            FROM mr_player_match pm
-            JOIN mr_hero_segments hs
-              ON hs.season_id=pm.season_id
-             AND hs.match_uid=pm.match_uid
-             AND hs.player_uid=pm.player_uid
-            WHERE pm.season_id=?
-              AND pm.match_uid IN ({q_marks})
-              AND COALESCE(pm.is_bot,0)=0
-              AND COALESCE(hs.is_bot,0)=0
-              AND hs.hero_id IS NOT NULL
-            """,
-            (int(season_id), *chunk),
-        )
-
-        for mid, uid, camp, hid, sec in c.fetchall() or []:
-            mid_s = str(mid or "")
-            if not mid_s or mid_s not in side_by_mid:
-                continue
-            uid_i = _safe_int(uid)
-            if uid_i <= 0 or uid_i == int(player_uid):
-                continue
-
-            s = _profile_norm_side(camp)
-            if s is None or s != side_by_mid[mid_s]:
-                continue  # not a teammate
-
-            hi = _safe_int(hid)
-            if hi <= 0:
-                continue
-            se = float(_safe_float(sec))
-
-            key = (mid_s, uid_i)
-            prev = best_by_pair.get(key)
-            if prev is None or se > prev[1]:
-                best_by_pair[key] = (hi, se)
-
-    # Convert to "hero present in match" (unique set per match)
-    heroes_present_by_mid: dict[str, set[int]] = defaultdict(set)
-    for (mid_s, _uid_i), (hi, _se) in best_by_pair.items():
-        heroes_present_by_mid[mid_s].add(int(hi))
-
-    games_by_h: dict[int, int] = defaultdict(int)
-    wins_by_h: dict[int, int] = defaultdict(int)
-
-    for mid_s, hero_set in heroes_present_by_mid.items():
-        w = int(win_by_mid.get(mid_s, 0))
-        for hi in hero_set:
-            games_by_h[hi] += 1
-            wins_by_h[hi] += w
-
-    items = []
-    for hi, g in games_by_h.items():
-        if g < min_games:
-            continue
-        w = int(wins_by_h.get(hi, 0))
-        items.append({
-            "hero_id": int(hi),
-            "games": int(g),
-            "wins": int(w),
-            "win_pct": (w / g * 100.0) if g else 0.0,
-        })
-
-    if not items:
-        return [], []
-
-    best = sorted(items, key=lambda x: (x["win_pct"], x["games"]), reverse=True)[:top_n]
-    worst = sorted(items, key=lambda x: (x["win_pct"], -x["games"]))[:top_n]
-    return best, worst
-
-
-# ------------------------------------------------------------------------------------------------------------
-# Rendering helpers
-# ------------------------------------------------------------------------------------------------------------
-# ------------------------------------------------------------------------------------------------------------
-# Snapshot rows builder (no bars)
-# ------------------------------------------------------------------------------------------------------------
 def _profile_pack_sync(season_id: int, player_uid: int) -> dict:
-    totals = _profile_get_season_totals(season_id, player_uid)
+    ensure_mr_api_tables()
+    totals = _profile_get_season_totals(c, season_id, player_uid)
 
     # Percentiles baseline: humans with ≥5 games
-    all_metrics = _profile_get_all_player_metrics(season_id, min_games=5)
-    my_acc = _profile_get_accuracy_by_player(season_id).get(int(player_uid))
+    all_metrics = _profile_get_all_player_metrics(c, season_id, min_games=5)
+    my_acc = _profile_get_accuracy_by_player(c, season_id).get(int(player_uid))
 
     my_for_snapshot = {
         "win_pct": totals["win_pct"],
@@ -12226,27 +11545,27 @@ def _profile_pack_sync(season_id: int, player_uid: int) -> dict:
     enable_pct = totals["games"] >= 5
     snapshot_rows = _profile_build_snapshot_rows(all_metrics, my_for_snapshot, enable_pct=enable_pct)
 
-    hero_stats = _profile_get_hero_stats(season_id, player_uid)
+    hero_stats = _profile_get_hero_stats(c, season_id, player_uid)
 
-    role_map = _profile_load_hero_roles()
-    role_share, role_wr = _profile_get_role_mix_and_role_wr(season_id, player_uid, role_map)
+    role_map = _profile_load_hero_roles(c)
+    role_share, role_wr = _profile_get_role_mix_and_role_wr(c, season_id, player_uid, role_map)
     best_role = _profile_pick_best_role(role_wr, min_games=4)
 
     signature = _profile_signature_heroes_by_performance(hero_stats, min_games=5, limit=5)
 
-    chem = _profile_get_chemistry(season_id, player_uid, min_games=4)
+    chem = _profile_get_chemistry(c, season_id, player_uid, min_games=4)
 
     teammate_win, teammate_risk = _profile_get_teammate_hero_wr_lists(
-        season_id, player_uid, min_games=5, top_n=3
+        c, season_id, player_uid, min_games=5, top_n=3
     )
 
-    bans = _profile_get_enemy_bans(season_id, player_uid)
+    bans = _profile_get_enemy_bans(c, season_id, player_uid)
 
-    seq = _profile_get_win_seq_by_import_time(season_id, player_uid)
+    seq = _profile_get_win_seq_by_import_time(c, season_id, player_uid)
     form10 = _profile_form_str(seq, 10)
     streak = _profile_current_streak(seq)
 
-    momentum = _profile_get_momentum_last_n(season_id, player_uid, n=10)
+    momentum = _profile_get_momentum_last_n(c, season_id, player_uid, n=10)
 
     return {
         "season_id": int(season_id),
