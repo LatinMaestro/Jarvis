@@ -59,6 +59,7 @@ from jarvis.stats.low_team import (
     render_low_team_image as _render_low_team_image,
 )
 from jarvis.stats.player_bans import load_ban_events, load_human_player_matches
+from jarvis.stats.profiles import latest_player_name, list_human_players
 from jarvis.stats.role_winrates import load_role_segment_rows
 from jarvis.stats.seasons import (
     season_date_range as _read_season_date_range,
@@ -11756,22 +11757,7 @@ def _get_api_players(season_id: int) -> list[dict]:
     Humans only. Returns [{player_uid, player}]
     """
     ensure_mr_api_tables()
-    c.execute(
-        """
-        SELECT player_uid, player, MAX(rowid) as mx
-        FROM mr_player_match
-        WHERE season_id=? AND is_bot=0
-        GROUP BY player_uid
-        ORDER BY LOWER(player) ASC
-    """,
-        (int(season_id),),
-    )
-    out = []
-    for uid, nm, _mx in c.fetchall() or []:
-        if uid is None:
-            continue
-        out.append({"player_uid": int(uid), "player": str(nm or f"UID_{uid}")})
-    return out
+    return list_human_players(c, season_id)
 
 
 def _resolve_player_uid(season_id: int, player_name: str) -> Optional[int]:
@@ -11801,18 +11787,7 @@ def _resolve_player_uid(season_id: int, player_name: str) -> Optional[int]:
 
 def _get_player_display_name(season_id: int, player_uid: int) -> str:
     ensure_mr_api_tables()
-    c.execute(
-        """
-        SELECT player
-        FROM mr_player_match
-        WHERE season_id=? AND player_uid=? AND is_bot=0
-        ORDER BY rowid DESC
-        LIMIT 1
-    """,
-        (int(season_id), int(player_uid)),
-    )
-    r = c.fetchone()
-    return str(r[0]) if r and r[0] else f"UID_{player_uid}"
+    return latest_player_name(c, season_id, player_uid)
 
 
 # ------------------------------------------------------------------------------------------------------------
