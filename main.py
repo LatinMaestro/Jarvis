@@ -51,7 +51,7 @@ from jarvis.naming import (
 from jarvis.rendering.fonts import BODY_PT, DEFAULT_FONT_PATH, TITLE_PT, get_fonts
 from jarvis.stats.hero_bans import get_top_hero_bans as _get_top_hero_bans
 from jarvis.stats.hero_time import get_hero_time_by_player as _get_hero_time_by_player
-from jarvis.stats.hero_roles import load_hero_cache_rows, load_season_hero_usage
+from jarvis.stats.hero_roles import load_hero_cache_rows, load_hero_name_rows, load_season_hero_usage
 from jarvis.stats.games import get_recent_games as _get_recent_games
 from jarvis.stats.head_to_head import get_opponent_match_uids, load_accuracy_components, load_player_totals
 from jarvis.stats.low_team import (
@@ -1860,8 +1860,7 @@ def _load_hero_name_map() -> dict[str, str]:
     global c
     m: dict[str, str] = {}
     try:
-        c.execute("SELECT hero_id, hero_name FROM hero_cache")
-        for hid, nm in c.fetchall():
+        for hid, nm in load_hero_name_rows(c):
             hid_s = _safe_str(hid)
             nm_s = _hero_pretty(nm)
             if hid_s and nm_s:

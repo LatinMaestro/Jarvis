@@ -3,6 +3,11 @@ def load_hero_cache_rows(cursor) -> list[tuple]:
     return cursor.fetchall() or []
 
 
+def load_hero_name_rows(cursor) -> list[tuple]:
+    cursor.execute("SELECT hero_id, hero_name FROM hero_cache")
+    return cursor.fetchall() or []
+
+
 def load_season_hero_usage(cursor, season_id: int) -> list[tuple]:
     cursor.execute(
         """
