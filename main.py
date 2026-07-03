@@ -58,7 +58,12 @@ from jarvis.stats.low_team import (
     calculate_low_team_results as _calculate_low_team_results,
     render_low_team_image as _render_low_team_image,
 )
-from jarvis.stats.player_bans import load_ban_events, load_human_player_matches
+from jarvis.stats.player_bans import (
+    build_player_bans_report,
+    load_ban_events,
+    load_human_player_matches,
+    render_player_bans_image,
+)
 from jarvis.stats.profiles import latest_player_name, list_human_players, load_accuracy_rows, load_season_totals
 from jarvis.stats.role_winrates import load_role_segment_rows
 from jarvis.stats.seasons import (
@@ -6246,334 +6251,49 @@ async def hero_bans(ctx):
 # =========================
 @bot.command(name="player_bans")
 async def player_bans(ctx):
-    """
-    Main table: Player | Eligible Games | Enemy Ban #1 | #2 | #3
-      - Counts ONLY bans made by the opposing team in matches the player appeared in.
-      - "Games" counts only eligible matches (we know player's camp AND bans exist).
-
-    Under-table: Top 5 highest enemy-ban rates overall (unique heroes; min games).
-    """
-    global c, conn
-
-    # IMPORTANT: import BEFORE any use (prevents UnboundLocalError)
-    from collections import defaultdict, Counter
-
+    """Render enemy-team ban rates for each player in the current season."""
     season_id = get_current_season_id()
-
-    # Ensure tables exist
     try:
         ensure_mr_api_tables()
     except Exception:
         await ctx.send("Database tables are not initialised yet. Please run the startup init once.")
         return
 
-    # Avoid command-triggered API calls by default. Run !refresh_heroes manually when cache needs updating.
     if _allow_command_hero_cache_refresh():
         try:
             await refresh_hero_cache(force=False)
         except Exception:
             pass
-
     hero_map = _load_hero_name_map()
 
-    def hero_label(hid) -> str:
-        hs = _safe_str(hid)
-        return hero_map.get(hs, hs if hs else "-")
-
-    def _clip(s: str, n: int) -> str:
-        s = s or ""
-        return s if len(s) <= n else (s[: max(0, n - 1)] + "…")
-
-    def _norm_side(v):
-        """
-        Normalise side/team values into 0/1.
-        Accepts:
-          - 0/1 (returns as-is)
-          - 1/2 (converts to 0/1)
-        Returns None if unknown.
-        """
-        try:
-            i = int(v)
-        except Exception:
-            return None
-        if i in (0, 1):
-            return i
-        if i in (1, 2):
-            return i - 1
-        return None
-
-    # ---------------------------------------------------------------------
-    # Build: player_matches + player_side from mr_player_match (exclude bots)
-    # ---------------------------------------------------------------------
     try:
-        pm_rows = load_human_player_matches(c, season_id)
-    except Exception as e:
-        await ctx.send(f"Could not read mr_player_match: {repr(e)}")
+        player_match_rows = load_human_player_matches(c, season_id)
+    except Exception as error:
+        await ctx.send(f"Could not read mr_player_match: {repr(error)}")
         return
-
-    player_matches = defaultdict(set)   # player -> set(match_uid)
-    player_side = {}                   # (player, match_uid) -> 0/1
-
-    for mid, player, camp in pm_rows:
-        mid_s = _safe_str(mid)
-        p_s = _safe_str(player)
-        if not mid_s or not p_s:
-            continue
-        player_matches[p_s].add(mid_s)
-
-        s = _norm_side(camp)
-        if s is not None:
-            player_side[(p_s, mid_s)] = s
-
-    if not player_matches:
+    if not player_match_rows:
         await ctx.send("No player/match data found for the current season.")
         return
 
-    # ---------------------------------------------------------------------
-    # Build: bans_by_match_side from mr_ban_picks (is_pick = 0 => bans)
-    # ---------------------------------------------------------------------
     try:
         ban_rows = load_ban_events(c, season_id)
-    except Exception as e:
-        await ctx.send(f"Could not read mr_ban_picks: {repr(e)}")
+    except Exception as error:
+        await ctx.send(f"Could not read mr_ban_picks: {repr(error)}")
         return
-
     if not ban_rows:
         await ctx.send("No ban data found for the current season (mr_ban_picks returned 0 rows).")
         return
 
-    bans_by_match_side = defaultdict(lambda: {0: [], 1: []})  # mid -> {0:[hid], 1:[hid]}
-    for mid, bside, hid in ban_rows:
-        mid_s = _safe_str(mid)
-        hid_s = _safe_str(hid)
-        s = _norm_side(bside)
-        if not mid_s or not hid_s or s is None:
-            continue
-        bans_by_match_side[mid_s][s].append(hid_s)
-
-    matches_with_bans = set(bans_by_match_side.keys())
-
-    def _enemy_bans_for(player: str, mid: str) -> list[str]:
-        """
-        Returns bans made by the opposing team in match 'mid' against 'player'.
-        """
-        s = player_side.get((player, mid))
-        if s not in (0, 1):
-            return []
-        enemy = 1 - s
-        return bans_by_match_side.get(mid, {}).get(enemy, []) or []
-
-    # ---------------------------------------------------------------------
-    # Build per-player top 3 (enemy bans only)
-    # ---------------------------------------------------------------------
-    table_rows = []
-
-    for player in sorted(player_matches.keys(), key=lambda x: x.lower()):
-        mids = player_matches[player]
-
-        eligible_mids = [
-            mid for mid in mids
-            if mid in matches_with_bans and player_side.get((player, mid)) in (0, 1)
-        ]
-        games = len(eligible_mids)
-        if games <= 0:
-            continue
-
-        counter = Counter()
-        for mid in eligible_mids:
-            for b in _enemy_bans_for(player, mid):
-                if b:
-                    counter[b] += 1
-
-        top3 = counter.most_common(3)
-
-        def fmt(item):
-            if not item:
-                return "-"
-            hid, cnt = item
-            pct = (cnt / games) * 100.0
-            # keep it compact for the table
-            return f"{_clip(hero_label(hid), 18)} ({cnt}, {pct:.0f}%)"
-
-        b1 = top3[0] if len(top3) > 0 else None
-        b2 = top3[1] if len(top3) > 1 else None
-        b3 = top3[2] if len(top3) > 2 else None
-
-        table_rows.append({
-            "player": player,
-            "games": games,
-            "b1": fmt(b1),
-            "b2": fmt(b2),
-            "b3": fmt(b3),
-        })
-
-    if not table_rows:
+    report = build_player_bans_report(player_match_rows, ban_rows, hero_map)
+    if not report["table_rows"]:
         await ctx.send("No eligible matches with bans + known teams were found for this season.")
         return
 
-    # Sort main table by eligible games desc
-    table_rows.sort(key=lambda r: r["games"], reverse=True)
+    buffer = render_player_bans_image(season_id, report)
+    await ctx.send(file=discord.File(fp=buffer, filename="player_bans.png"))
 
-    # ---------------------------------------------------------------------
-    # Top 5 overall enemy-ban rates (unique hero), using each player's Top 3
-    # ---------------------------------------------------------------------
-    MIN_GAMES_TOP5 = 5
-    CANDIDATES_PER_PLAYER = 3
 
-    top_candidates = []  # (rate, games, cnt, player, hero)
-
-    for r in table_rows:
-        player = r["player"]
-        games = int(r["games"])
-        if games < MIN_GAMES_TOP5:
-            continue
-
-        counter = Counter()
-        mids = player_matches.get(player, set())
-        eligible_mids = [
-            mid for mid in mids
-            if mid in matches_with_bans and player_side.get((player, mid)) in (0, 1)
-        ]
-        games = len(eligible_mids)
-        if games < MIN_GAMES_TOP5:
-            continue
-
-        for mid in eligible_mids:
-            for b in _enemy_bans_for(player, mid):
-                if b:
-                    counter[b] += 1
-
-        for hid, cnt in counter.most_common(CANDIDATES_PER_PLAYER):
-            rate = cnt / games
-            top_candidates.append((rate, games, cnt, player, hid))
-
-    top_candidates.sort(key=lambda t: (t[0], t[1], t[2]), reverse=True)
-
-    seen_heroes = set()
-    top5 = []
-    for rate, games, cnt, player, hid in top_candidates:
-        hs = _safe_str(hid)
-        if not hs or hs in seen_heroes:
-            continue
-        seen_heroes.add(hs)
-        top5.append((rate, games, cnt, player, hid))
-        if len(top5) >= 5:
-            break
-
-    # ---------------------------------------------------------------------
-    # Render (styled like player_heros)
-    # ---------------------------------------------------------------------
-    W, H = 1500, 980
-    pad = 26
-
-    bg = (20, 20, 26)
-    card = (32, 32, 44)
-    line = (80, 80, 100)
-    accent = (255, 215, 0)
-    text = (235, 235, 235)
-    muted = (180, 180, 200)
-
-    img = Image.new("RGB", (W, H), bg)
-    draw = ImageDraw.Draw(img)
-
-    try:
-        body_font, title_font = get_fonts()
-    except Exception:
-        body_font = ImageFont.load_default()
-        title_font = ImageFont.load_default()
-
-    draw.rounded_rectangle([pad, pad, W - pad, H - pad], radius=22, fill=card)
-
-    title = f"Enemy Team Bans vs Players — Season {season_id}"
-    draw.text((pad * 2, int(pad * 1.4)), title, font=title_font, fill=accent)
-
-    left_x = pad * 2
-    y = int(pad * 3.4)
-
-    # Column x positions (fit inside the card)
-    x_player = left_x
-    x_games = left_x + 300
-    x_b1 = left_x + 400
-    x_b2 = left_x + 730
-    x_b3 = left_x + 1060
-
-    # Headers
-    draw.text((x_player, y), "Player", font=body_font, fill=muted)
-    draw.text((x_games, y), "Games", font=body_font, fill=muted)
-    draw.text((x_b1, y), "Enemy Ban #1", font=body_font, fill=muted)
-    draw.text((x_b2, y), "Enemy Ban #2", font=body_font, fill=muted)
-    draw.text((x_b3, y), "Enemy Ban #3", font=body_font, fill=muted)
-
-    y += 28
-    draw.line([(pad * 2, y), (W - pad * 2, y)], fill=line, width=2)
-    y += 14
-
-    # Main rows (limit to keep a consistent card height)
-    max_main_rows = 15
-    for r in table_rows[:max_main_rows]:
-        draw.text((x_player, y), _clip(r["player"], 18), font=body_font, fill=text)
-        draw.text((x_games, y), str(r["games"]), font=body_font, fill=text)
-        draw.text((x_b1, y), _clip(r["b1"], 28), font=body_font, fill=text)
-        draw.text((x_b2, y), _clip(r["b2"], 28), font=body_font, fill=text)
-        draw.text((x_b3, y), _clip(r["b3"], 28), font=body_font, fill=text)
-        y += 32
-
-    # Divider before summary
-    y += 6
-    draw.line([(pad * 2, y), (W - pad * 2, y)], fill=line, width=2)
-    y += 14
-
-    # Summary title
-    draw.text(
-        (left_x, y),
-        f"Top 5 highest enemy-ban rates (unique heroes; min {MIN_GAMES_TOP5} games)",
-        font=body_font,
-        fill=muted,
-    )
-    y += 34
-
-    # Summary headers
-    x_rank = left_x
-    x_sp = left_x + 90
-    x_hero = left_x + 390
-    x_cnt = left_x + 760
-    x_rate = left_x + 900
-
-    draw.text((x_rank, y), "Rank", font=body_font, fill=muted)
-    draw.text((x_sp, y), "Player", font=body_font, fill=muted)
-    draw.text((x_hero, y), "Hero", font=body_font, fill=muted)
-    draw.text((x_cnt, y), "Count", font=body_font, fill=muted)
-    draw.text((x_rate, y), "Rate", font=body_font, fill=muted)
-
-    y += 28
-    draw.line([(pad * 2, y), (W - pad * 2, y)], fill=line, width=2)
-    y += 14
-
-    for i, (rate, games, cnt, player, hid) in enumerate(top5, start=1):
-        draw.text((x_rank, y), f"#{i}", font=body_font, fill=text)
-        draw.text((x_sp, y), _clip(player, 18), font=body_font, fill=text)
-        draw.text((x_hero, y), _clip(hero_label(hid), 22), font=body_font, fill=text)
-        draw.text((x_cnt, y), str(cnt), font=body_font, fill=text)
-        draw.text((x_rate, y), f"{rate*100:.0f}%", font=body_font, fill=text)
-        y += 32
-
-    # Footer note
-    footer = "Games count only matches with recorded bans + known team side. Bans shown are the opposing team’s bans."
-    draw.text((left_x, H - pad - 58), footer, font=body_font, fill=muted)
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    buf.seek(0)
-    await ctx.send(file=discord.File(fp=buf, filename="player_bans.png"))
-
-# =========================
-# =========================
-# =========================
-# =========================
-# =========================
-# =========================
 # More Selected Top-3 Exposure
-# =========================
 TOP3_MORE_MIN_GAMES_FOR_LIFT = 3
 
 
