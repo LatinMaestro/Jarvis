@@ -59,7 +59,7 @@ from jarvis.stats.low_team import (
     render_low_team_image as _render_low_team_image,
 )
 from jarvis.stats.player_bans import load_ban_events, load_human_player_matches
-from jarvis.stats.profiles import latest_player_name, list_human_players
+from jarvis.stats.profiles import latest_player_name, list_human_players, load_accuracy_rows
 from jarvis.stats.role_winrates import load_role_segment_rows
 from jarvis.stats.seasons import (
     season_date_range as _read_season_date_range,
@@ -11880,18 +11880,7 @@ def _profile_get_accuracy_by_player(season_id: int) -> dict[int, float]:
     ensure_mr_api_tables()
     out: dict[int, float] = {}
     try:
-        c.execute(
-            """
-            SELECT player_uid,
-                   SUM(CASE WHEN session_hit_rate IS NOT NULL THEN session_hit_rate * COALESCE(seconds,0) ELSE 0 END) AS hit_sum,
-                   SUM(CASE WHEN session_hit_rate IS NOT NULL THEN COALESCE(seconds,0) ELSE 0 END) AS sec_sum
-            FROM mr_hero_segments
-            WHERE season_id=? AND COALESCE(is_bot,0)=0
-            GROUP BY player_uid
-        """,
-            (int(season_id),),
-        )
-        for uid, hit_sum, sec_sum in c.fetchall() or []:
+        for uid, hit_sum, sec_sum in load_accuracy_rows(c, season_id):
             uid_i = _safe_int(uid)
             sec = float(_safe_float(sec_sum))
             if uid_i <= 0 or sec <= 0.0:

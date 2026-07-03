@@ -27,3 +27,18 @@ def latest_player_name(cursor, season_id: int, player_uid: int) -> str:
     )
     row = cursor.fetchone()
     return str(row[0]) if row and row[0] else f"UID_{player_uid}"
+
+
+def load_accuracy_rows(cursor, season_id: int) -> list[tuple]:
+    cursor.execute(
+        """
+        SELECT player_uid,
+               SUM(CASE WHEN session_hit_rate IS NOT NULL THEN session_hit_rate * COALESCE(seconds,0) ELSE 0 END),
+               SUM(CASE WHEN session_hit_rate IS NOT NULL THEN COALESCE(seconds,0) ELSE 0 END)
+        FROM mr_hero_segments
+        WHERE season_id=? AND COALESCE(is_bot,0)=0
+        GROUP BY player_uid
+        """,
+        (int(season_id),),
+    )
+    return cursor.fetchall() or []
