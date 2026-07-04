@@ -317,5 +317,3 @@ def _render_profile_dashboard(player_name: str, pack: dict) -> io.BytesIO:
     img.save(buf, format="PNG")
     buf.seek(0)
     return buf
-
-

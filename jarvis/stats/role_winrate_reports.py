@@ -270,7 +270,6 @@ def _role_wr_render_overall_image(season_id: int, rows: list[dict]) -> io.BytesI
     buf.seek(0)
     return buf
 
-
 def _role_wr_render_teammate_image(
     season_id: int,
     anchor_player: str,
@@ -356,4 +355,3 @@ def _role_wr_render_teammate_image(
     img.save(buf, format="PNG")
     buf.seek(0)
     return buf
-
