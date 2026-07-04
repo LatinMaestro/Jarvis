@@ -1,0 +1,1 @@
+"""Shared image-rendering helpers."""
