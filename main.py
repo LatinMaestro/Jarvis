@@ -111,6 +111,7 @@ from jarvis.stats.seasons import (
     season_date_range as _read_season_date_range,
     season_game_count as _read_season_game_count,
 )
+from jarvis.stats.season_fairness_export import load_fairness_replay
 from jarvis.stats.sessions import (
     aggregate_wl_for_labels as _read_session_wl,
     load_all_ordered_game_labels,
@@ -14148,6 +14149,7 @@ async def _smp_build_movie_pack_md(season_id: int) -> io.BytesIO | None:
         "arcs": arcs,
         "beats": beats,
         "finale": finale,
+        "fairness_replay": load_fairness_replay(c, season_id),
     }
 
     pack_json = json.dumps(pack, ensure_ascii=False, indent=2)
@@ -14174,6 +14176,7 @@ async def _smp_build_movie_pack_md(season_id: int) -> io.BytesIO | None:
     lines.append("- JSON.meta_timeline + meta_shifts: evolving tactics; an arms race, counters, new threats.")
     lines.append("- JSON.arcs: character momentum (late surge, slump, struggle).")
     lines.append("- JSON.core.biggest_upset: major plot twist (do not narrate it as a stat).")
+    lines.append("- JSON.fairness_replay: diagnostic appendix for offline team-fairness analysis; do not narrate every game.")
     lines.append("")
     lines.append("Structure:")
     lines.append("1) Title + tagline")
