@@ -76,6 +76,10 @@ EXPECTED_COMMANDS = {
         ),
     ),
     "submit_match": ("submit_match", ()),
+    "teammate_role_bans": (
+        "teammate_role_bans",
+        ("role_ban_matrix", "teammate_ban_matrix"),
+    ),
     "teammate_matrix_fair": ("teammate_matrix_fair", ()),
     "teammate_matrix_lowteam_fair": (
         "teammate_matrix_lowteam_fair",
@@ -139,6 +143,33 @@ class MainCharacterizationTests(unittest.TestCase):
             for name, (callback, aliases, _path) in _command_inventory().items()
         }
         self.assertEqual(actual, EXPECTED_COMMANDS)
+
+    def test_role_ban_matrix_is_in_run_all_stats(self):
+        tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8-sig"))
+        channel_map = None
+        for node in tree.body:
+            if not isinstance(node, ast.Assign):
+                continue
+            if any(isinstance(target, ast.Name) and target.id == "STATS_CHANNELS" for target in node.targets):
+                channel_map = ast.literal_eval(node.value)
+                break
+        self.assertIsNotNone(channel_map)
+        self.assertEqual(
+            channel_map.get("teammate_role_bans"),
+            "stats-teammate-role-bans",
+        )
+
+    def test_next_teams_visible_message_format_is_preserved(self):
+        source = (ROOT / "main.py").read_text(encoding="utf-8-sig")
+        expected_fragments = (
+            'lines = [f"**Next Teams (with role restrictions) (score {base_score:.3f})**"]',
+            'lines.append(f"🎲 Picked **#{picked_rank} of {picked_pool}**")',
+            'return f"{disp(p)} ({_nt_role_emoji((restricted_roles or {}).get(p))})"',
+            'f"**{label_a}:** " + ", ".join(_disp_with_restrict(p) for p in sorted(team_a))',
+            'f"**{label_b}:** " + ", ".join(_disp_with_restrict(p) for p in sorted(team_b))',
+        )
+        for fragment in expected_fragments:
+            self.assertIn(fragment, source)
 
     def test_command_names_and_aliases_are_unique(self):
         exposed_names = []

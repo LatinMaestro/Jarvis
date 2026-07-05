@@ -1,3 +1,4 @@
+import json
 from collections import defaultdict
 from itertools import combinations
 
@@ -43,6 +44,7 @@ def build_fairness_replay(
     player_rows,
     ordered_labels,
     role_rows=(),
+    role_ban_history=None,
 ) -> dict:
     by_game = defaultdict(list)
     names = {}
@@ -166,6 +168,28 @@ def build_fairness_replay(
             ),
         })
 
+    role_ban_rolls = []
+    if isinstance(role_ban_history, dict):
+        for roll in role_ban_history.get("rolls", []):
+            if not isinstance(roll, dict) or not roll.get("confirmed_match_uid"):
+                continue
+
+            def _uid(player_key):
+                value = str(player_key or "")
+                if value.startswith("u") and value[1:].isdigit():
+                    return int(value[1:])
+                return value
+
+            role_ban_rolls.append({
+                "sequence": len(role_ban_rolls) + 1,
+                "team_0": [_uid(player) for player in roll.get("team_a", [])],
+                "team_1": [_uid(player) for player in roll.get("team_b", [])],
+                "restricted_roles": [
+                    {"player_uid": _uid(player), "banned_role": role}
+                    for player, role in sorted((roll.get("restricted_roles") or {}).items())
+                ],
+            })
+
     return {
         "schema_version": 1,
         "purpose": "Offline next-teams fairness replay; derived human team assignments only.",
@@ -174,6 +198,7 @@ def build_fairness_replay(
         "players": players,
         "games": games,
         "pairs": pairs,
+        "committed_role_ban_rolls": role_ban_rolls,
         "privacy_note": "No raw match JSON, combat stats, Discord IDs, or secrets are included.",
     }
 
@@ -226,6 +251,20 @@ def load_fairness_replay(cursor, season_id: int) -> dict:
     except Exception:
         role_rows = []
 
+    role_ban_history = None
+    try:
+        cursor.execute(
+            "SELECT value FROM bot_settings WHERE key=?",
+            (f"next_teams_role_ban_history_v1_s{int(season_id)}",),
+        )
+        row = cursor.fetchone()
+        if row and row[0]:
+            value = json.loads(row[0])
+            if isinstance(value, dict):
+                role_ban_history = value
+    except Exception:
+        role_ban_history = None
+
     return build_fairness_replay(
-        int(season_id), player_rows, ordered_labels, role_rows
+        int(season_id), player_rows, ordered_labels, role_rows, role_ban_history
     )
