@@ -14275,6 +14275,7 @@ STATS_CHANNELS = {
     "season_story": "stats-season-story",
     "teammate_matrix_fair": "stats-teammate-matrix-fair",
     "teammate_matrix_lowteam_fair": "stats-teammate-matrix-lowteam-fair",
+    "teammate_role_bans": "stats-teammate-role-bans",
     "win_matrix": "stats-win-matrix",
     "hero_bans": "stats-hero-bans",
     "player_bans": "stats-player-bans",
