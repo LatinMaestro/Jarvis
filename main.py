@@ -112,6 +112,13 @@ from jarvis.stats.seasons import (
     season_game_count as _read_season_game_count,
 )
 from jarvis.stats.season_fairness_export import load_fairness_replay
+from jarvis.stats.team_fairness import (
+    candidate_pair_target_penalty as _nt_candidate_pair_target_penalty,
+    candidate_role_ban_exposure_penalty as _nt_candidate_role_ban_exposure_penalty,
+    dynamic_pair_lock_limit as _nt_dynamic_pair_lock_limit,
+    record_role_ban_exposure as _nt_record_role_ban_exposure,
+    same_team_probability as _nt_same_team_probability,
+)
 from jarvis.stats.sessions import (
     aggregate_wl_for_labels as _read_session_wl,
     load_all_ordered_game_labels,
@@ -435,6 +442,7 @@ def _serialize_session(session) -> dict:
                 "team_b": sorted(list(g["team_b"])),
                 "low_team": sorted(list(g["low_team"])) if g.get("low_team") else None,
                 "restricted_roles": dict(g.get("restricted_roles") or {}) if g.get("restricted_roles") else None,
+                "season_id": g.get("season_id"),
             }
             for g in (getattr(session, "session_games", None) or [])
         ],
@@ -453,6 +461,7 @@ def _serialize_session(session) -> dict:
             "team_b": sorted(list(session.pending_roll_data.get("team_b", []))),
             "low_team": sorted(list(session.pending_roll_data.get("low_team", []))) if session.pending_roll_data.get("low_team") else None,
             "restricted_roles": dict(session.pending_roll_data.get("restricted_roles") or {}) if session.pending_roll_data.get("restricted_roles") else None,
+            "season_id": session.pending_roll_data.get("season_id"),
         } if getattr(session, "pending_roll_data", None) else None),
         "pair_lock_47_disabled": bool(getattr(session, "pair_lock_47_disabled", False)),
         "pair_lock_47_disabled_lobby": (
@@ -486,6 +495,7 @@ def _apply_session_state(session, data: dict):
             "team_b": team_b,
             "low_team": low_team,
             "restricted_roles": restricted_roles,
+            "season_id": g.get("season_id"),
         })
 
     # Low-team counts
@@ -524,6 +534,7 @@ def _apply_session_state(session, data: dict):
             "team_b": frozenset(prd.get("team_b") or []),
             "low_team": frozenset(prd.get("low_team") or []) if prd.get("low_team") else None,
             "restricted_roles": restricted_roles,
+            "season_id": prd.get("season_id"),
         }
     else:
         session.pending_roll_data = None
@@ -16686,6 +16697,58 @@ def _nt_role_split_penalty(team_a: set[str], team_b: set[str], restricted_roles:
     total = float(cov + conc)
     return total, {"coverage": cov, "concentration": conc}
 
+
+def _nt_role_ban_history_setting_key(season_id: int) -> str:
+    return f"next_teams_role_ban_history_v1_s{int(season_id)}"
+
+
+def _nt_load_role_ban_history(season_id: int) -> dict:
+    try:
+        c.execute(
+            "SELECT value FROM bot_settings WHERE key=?",
+            (_nt_role_ban_history_setting_key(season_id),),
+        )
+        row = c.fetchone()
+        if row and row[0]:
+            value = json.loads(row[0])
+            if isinstance(value, dict):
+                return value
+    except Exception:
+        pass
+    return {"version": 1, "entries": {}}
+
+
+def _nt_save_role_ban_history(season_id: int, history: dict) -> None:
+    payload = json.dumps(history, ensure_ascii=True, separators=(",", ":"))
+    c.execute(
+        """
+        INSERT INTO bot_settings(key, value) VALUES(?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """,
+        (_nt_role_ban_history_setting_key(season_id), payload),
+    )
+    conn.commit()
+
+
+def _nt_record_committed_role_bans(
+    *,
+    season_id: int,
+    team_a: frozenset[str],
+    team_b: frozenset[str],
+    restricted_roles: dict[str, str] | None,
+) -> None:
+    if not restricted_roles:
+        return
+    history = _nt_load_role_ban_history(season_id)
+    updated = _nt_record_role_ban_exposure(
+        history,
+        team_a,
+        team_b,
+        restricted_roles,
+    )
+    _nt_save_role_ban_history(season_id, updated)
+
+
 def _nt_role_emoji(role: str) -> str:
     r = (role or "").strip()
     return {
@@ -16706,7 +16769,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
     Next-teams fairness roll.
 
     Goals:
-      - Keep season pairing %s close to 50% for all players (presence-aware band 40–60%).
+      - Keep season pairing rates close to the neutral target for each historical lobby size.
       - Keep low-team exposure (when uneven teams) close to the lobby target.
       - Season-wide anti-lumping: spread teammate exposure across ALL season games,
         and ALSO include committed games from the current session BEFORE rolling again.
@@ -16750,8 +16813,8 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
     # =====================================================================================
     # Role Restrictions — ALWAYS enforced (season DB + committed session overlay)
     # =====================================================================================
+    season_id_now = get_current_season_id()
     try:
-        season_id_now = get_current_season_id()
         restricted_roles, role_restrict_debug = await _nt_build_restricted_roles_for_roll(
             season_id=season_id_now,
             active_pkeys=active,
@@ -16760,6 +16823,8 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
     except Exception:
         restricted_roles = {p: random.choice(("Vanguard", "Duelist", "Strategist")) for p in active}
         role_restrict_debug = {}
+
+    role_ban_history = _nt_load_role_ban_history(season_id_now)
 
     # Team sizes
     if n % 2 == 0:
@@ -16820,19 +16885,19 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
     LOWTEAM_PRIORITY_WINDOW_MISS_WEIGHT = 900.0
 
     # ------------------------------------------------------------------
-    # Pairing steering (existing “steep” terms)
+    # Pairing steering
     # ------------------------------------------------------------------
     PAIR_WORST_OVER_WEIGHT = 9.0
     PAIR_UNDERUSE_REWARD = 4.2
     PAIR_WORST_OVER_POW = 2.3
     PAIR_SAMPLE_DAMP_K = 4.0
-    PAIR_LOCK_THRESHOLD = 0.47 #hard lock of pairings over %
+    PAIR_LOCK_MARGIN = 0.10
+    PAIR_LOCK_MIN_SEEN = 6
 
     # ------------------------------------------------------------------
-    # Season-wide band (±10% => 40–60)
+    # Soft steering around each pair's lobby-size-aware neutral target.
     # ------------------------------------------------------------------
-    BAND_LOW = 0.40
-    BAND_HIGH = 0.60
+    PAIR_TARGET_SOFT_MARGIN = 0.05
 
     PAIR_BAND_POW = 2.1
     PAIR_BAND_SAMPLE_DAMP = 4.0
@@ -17134,9 +17199,6 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
                 pkey = _pkey_from_uid(int(uid))
             except Exception:
                 continue
-            if pkey not in active_set:
-                continue
-
             mu_s = str(mu)
             rec = match_rec.get(mu_s)
             if rec is None:
@@ -17161,6 +17223,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
 
     pair_seen = defaultdict(int)
     pair_together = defaultdict(int)
+    pair_expected = defaultdict(float)
     pair_streak = {}
 
     matches = list(match_rec.values())
@@ -17174,8 +17237,11 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
             continue
 
         pres = sorted(present)
+        neutral_probability = _nt_same_team_probability(len(winners), len(losers))
         for a, b in combinations(pres, 2):
-            pair_seen[_pair_key(a, b)] += 1
+            pair = _pair_key(a, b)
+            pair_seen[pair] += 1
+            pair_expected[pair] += neutral_probability
 
         for team in (winners, losers):
             t = sorted(team)
@@ -17187,15 +17253,18 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
     # so the next roll sees the current band position.
     sess_recs = []
     for si, g in enumerate(session.session_games or []):
-        ta = set(g.get("team_a") or []) & active_set
-        tb = set(g.get("team_b") or []) & active_set
+        ta = set(g.get("team_a") or [])
+        tb = set(g.get("team_b") or [])
         present = ta | tb
         if len(present) < 2:
             continue
 
         pres = sorted(present)
+        neutral_probability = _nt_same_team_probability(len(ta), len(tb))
         for a, b in combinations(pres, 2):
-            pair_seen[_pair_key(a, b)] += 1
+            pair = _pair_key(a, b)
+            pair_seen[pair] += 1
+            pair_expected[pair] += neutral_probability
 
         for team in (ta, tb):
             t = sorted(team)
@@ -17257,12 +17326,16 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
 
         # after placing them teammates next game: seen+1, together+1
         frac = (tog + 1.0) / (seen + 1.0)
+        expected = float(pair_expected.get(k2, 0.0)) + _nt_same_team_probability(big_size, small_size)
+        target = expected / (seen + 1.0)
+        band_low = max(0.0, target - PAIR_TARGET_SOFT_MARGIN)
+        band_high = min(1.0, target + PAIR_TARGET_SOFT_MARGIN)
 
         cost = 0.0
-        if frac > BAND_HIGH:
-            cost += PAIR_BAND_OVER_WEIGHT * ((frac - BAND_HIGH) ** PAIR_BAND_POW) * w
-        elif frac < BAND_LOW:
-            cost -= PAIR_BAND_UNDER_REWARD * ((BAND_LOW - frac) ** PAIR_BAND_POW) * w
+        if frac > band_high:
+            cost += PAIR_BAND_OVER_WEIGHT * ((frac - band_high) ** PAIR_BAND_POW) * w
+        elif frac < band_low:
+            cost -= PAIR_BAND_UNDER_REWARD * ((band_low - frac) ** PAIR_BAND_POW) * w
 
         st = float(pair_streak.get(k2, 0))
         if st > 0:
@@ -17282,14 +17355,18 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
 
         # opponents next game: seen+1, together unchanged
         frac = (tog) / (seen + 1.0)
+        expected = float(pair_expected.get(k2, 0.0)) + _nt_same_team_probability(big_size, small_size)
+        target = expected / (seen + 1.0)
+        band_low = max(0.0, target - PAIR_TARGET_SOFT_MARGIN)
+        band_high = min(1.0, target + PAIR_TARGET_SOFT_MARGIN)
 
         cost = 0.0
-        if frac < BAND_LOW:
-            cost += PAIR_BAND_UNDER_OPP_PENALTY * ((BAND_LOW - frac) ** PAIR_BAND_POW) * w
+        if frac < band_low:
+            cost += PAIR_BAND_UNDER_OPP_PENALTY * ((band_low - frac) ** PAIR_BAND_POW) * w
             if tog <= 0.0 and seen >= float(ZERO_PAIR_SEEN_MIN):
                 cost += ZERO_PAIR_OPP_PENALTY * w
-        elif frac > BAND_HIGH:
-            cost -= PAIR_BAND_OVER_OPP_REWARD * ((frac - BAND_HIGH) ** PAIR_BAND_POW) * w
+        elif frac > band_high:
+            cost -= PAIR_BAND_OVER_OPP_REWARD * ((frac - band_high) ** PAIR_BAND_POW) * w
 
         return cost
 
@@ -17312,7 +17389,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
         return pen
 
     # =====================================================================================
-    # Candidate generation + hard 47% pair lock
+    # Candidate generation + sample-aware dynamic pair lock
     # =====================================================================================
     pair_lock_auto_disabled_this_roll = False
     pair_lock_reenabled_this_roll = False
@@ -17347,9 +17424,22 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
         if bool(getattr(session, "pair_lock_47_disabled", False)):
             return set()
         out = set()
+        current_neutral = _nt_same_team_probability(big_size, small_size)
         for a, b in combinations(sorted(active), 2):
-            if _current_pair_rate(a, b) > float(PAIR_LOCK_THRESHOLD):
-                out.add(_pair_key(a, b))
+            pair = _pair_key(a, b)
+            limit = _nt_dynamic_pair_lock_limit(
+                pair,
+                pair_seen=pair_seen,
+                pair_expected=pair_expected,
+                current_neutral_probability=current_neutral,
+                margin=PAIR_LOCK_MARGIN,
+                minimum_seen=PAIR_LOCK_MIN_SEEN,
+            )
+            projected_rate = (
+                float(pair_together.get(pair, 0)) + 1.0
+            ) / (float(pair_seen.get(pair, 0)) + 1.0)
+            if limit is not None and projected_rate > limit:
+                out.add(pair)
         return out
 
     hard_locked_pairs = _locked_pairs_for_roll()
@@ -17470,9 +17560,31 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
             comp_pen = _season_composition_penalty(team_a) + _season_composition_penalty(team_b)
             opp_pen = _season_opponent_penalty(team_a, team_b)
 
-            role_pen, role_pen_meta = _nt_role_split_penalty(team_a, team_b, restricted_roles)
+            target_pair_pen, target_pair_meta = _nt_candidate_pair_target_penalty(
+                team_a,
+                team_b,
+                pair_seen=pair_seen,
+                pair_together=pair_together,
+                pair_expected=pair_expected,
+            )
 
-            total_score = float(base_score) + float(extra) + float(comp_pen) + float(opp_pen) + float(role_pen)
+            role_pen, role_pen_meta = _nt_role_split_penalty(team_a, team_b, restricted_roles)
+            role_ban_exposure_pen, role_ban_exposure_meta = _nt_candidate_role_ban_exposure_penalty(
+                team_a,
+                team_b,
+                restricted_roles,
+                role_ban_history,
+            )
+
+            total_score = (
+                float(base_score)
+                + float(extra)
+                + float(comp_pen)
+                + float(opp_pen)
+                + float(target_pair_pen)
+                + float(role_pen)
+                + float(role_ban_exposure_pen)
+            )
 
             meta = {
                 "team_a": team_a, "team_b": team_b, "low_team": low_team,
@@ -17483,11 +17595,18 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
                 "low_l1avg": float(l1avg),
                 "season_comp_penalty": float(comp_pen),
                 "season_opp_penalty": float(opp_pen),
+                "target_pair_penalty": float(target_pair_pen),
+                "target_pair_neutral_probability": float(target_pair_meta.get("neutral_probability", 0.0)),
+                "target_pair_max_deviation": float(target_pair_meta.get("max_weighted_deviation", 0.0)),
+                "target_pair_mean_squared_deviation": float(target_pair_meta.get("mean_weighted_squared_deviation", 0.0)),
                 "low_bias": float(low_bias),
                 "extra_total": float(extra),
                 "role_penalty": float(role_pen),
                 "role_pen_coverage": float(role_pen_meta.get("coverage", 0.0)),
                 "role_pen_concentration": float(role_pen_meta.get("concentration", 0.0)),
+                "role_ban_exposure_penalty": float(role_ban_exposure_pen),
+                "role_ban_exposure_max_deviation": float(role_ban_exposure_meta.get("max_weighted_deviation", 0.0)),
+                "role_ban_exposure_mean_squared_deviation": float(role_ban_exposure_meta.get("mean_weighted_squared_deviation", 0.0)),
                 "pair_lock_47_enforced": bool(enforce_pair_lock),
                 "low_post_abs": float(low_post_abs),
                 "low_post_max": float(low_post_max),
@@ -17569,6 +17688,10 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
         debug_info["steep_low_l1avg"] = picked.get("low_l1avg", 0.0)
         debug_info["steep_season_comp_penalty"] = picked.get("season_comp_penalty", 0.0)
         debug_info["steep_season_opp_penalty"] = picked.get("season_opp_penalty", 0.0)
+        debug_info["target_pair_penalty"] = picked.get("target_pair_penalty", 0.0)
+        debug_info["target_pair_neutral_probability"] = picked.get("target_pair_neutral_probability", 0.0)
+        debug_info["target_pair_max_deviation"] = picked.get("target_pair_max_deviation", 0.0)
+        debug_info["target_pair_mean_squared_deviation"] = picked.get("target_pair_mean_squared_deviation", 0.0)
         debug_info["steep_low_bias"] = picked.get("low_bias", 0.0)
         debug_info["steep_extra_total"] = picked.get("extra_total", 0.0)
         debug_info["total_with_steep_terms"] = float(picked_total)
@@ -17580,9 +17703,13 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
         debug_info["role_penalty"] = picked.get("role_penalty", 0.0)
         debug_info["role_pen_coverage"] = picked.get("role_pen_coverage", 0.0)
         debug_info["role_pen_concentration"] = picked.get("role_pen_concentration", 0.0)
+        debug_info["role_ban_exposure_penalty"] = picked.get("role_ban_exposure_penalty", 0.0)
+        debug_info["role_ban_exposure_max_deviation"] = picked.get("role_ban_exposure_max_deviation", 0.0)
+        debug_info["role_ban_exposure_mean_squared_deviation"] = picked.get("role_ban_exposure_mean_squared_deviation", 0.0)
         debug_info["restricted_roles"] = dict(restricted_roles or {})
         debug_info["restricted_roles_math"] = dict(role_restrict_debug or {})
-        debug_info["pair_lock_47_threshold"] = float(PAIR_LOCK_THRESHOLD)
+        debug_info["pair_lock_dynamic_margin"] = float(PAIR_LOCK_MARGIN)
+        debug_info["pair_lock_dynamic_min_seen"] = int(PAIR_LOCK_MIN_SEEN)
         debug_info["pair_lock_47_disabled"] = bool(getattr(session, "pair_lock_47_disabled", False))
         debug_info["pair_lock_47_disabled_lobby"] = list(getattr(session, "pair_lock_47_disabled_lobby", []) or [])
         debug_info["pair_lock_47_auto_disabled_this_roll"] = bool(pair_lock_auto_disabled_this_roll)
@@ -17641,6 +17768,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
         "team_b": team_b,
         "low_team": low_team,
         "restricted_roles": dict(restricted_roles or {}),
+        "season_id": int(season_id_now),
     }
 
     view = NextTeamsControlsView(key)
@@ -18211,13 +18339,25 @@ def _commit_pending_roll_fallback(session: SessionState,
 
     rr = data.get("restricted_roles")
     restricted_roles = dict(rr) if isinstance(rr, dict) and rr else None
+    season_id = int(data.get("season_id") or get_current_season_id())
 
     session.session_games.append({
         "team_a": team_a,
         "team_b": team_b,
         "low_team": low_team,
         "restricted_roles": restricted_roles,
+        "season_id": season_id,
     })
+
+    try:
+        _nt_record_committed_role_bans(
+            season_id=season_id,
+            team_a=team_a,
+            team_b=team_b,
+            restricted_roles=restricted_roles,
+        )
+    except Exception:
+        pass
 
     if low_team:
         for p in low_team:
@@ -18271,13 +18411,25 @@ def _commit_pending_roll(session: SessionState,
 
     rr = data.get("restricted_roles")
     restricted_roles = dict(rr) if isinstance(rr, dict) and rr else None
+    season_id = int(data.get("season_id") or get_current_season_id())
 
     session.session_games.append({
         "team_a": team_a,
         "team_b": team_b,
         "low_team": low_team,
         "restricted_roles": restricted_roles,
+        "season_id": season_id,
     })
+
+    try:
+        _nt_record_committed_role_bans(
+            season_id=season_id,
+            team_a=team_a,
+            team_b=team_b,
+            restricted_roles=restricted_roles,
+        )
+    except Exception:
+        pass
 
     # Update low-team counts used by the fairness engine.
     if low_team:
