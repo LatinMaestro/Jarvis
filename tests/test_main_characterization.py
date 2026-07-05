@@ -76,6 +76,10 @@ EXPECTED_COMMANDS = {
         ),
     ),
     "submit_match": ("submit_match", ()),
+    "teammate_role_bans": (
+        "teammate_role_bans",
+        ("role_ban_matrix", "teammate_ban_matrix"),
+    ),
     "teammate_matrix_fair": ("teammate_matrix_fair", ()),
     "teammate_matrix_lowteam_fair": (
         "teammate_matrix_lowteam_fair",

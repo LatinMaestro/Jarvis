@@ -171,7 +171,7 @@ def build_fairness_replay(
     role_ban_rolls = []
     if isinstance(role_ban_history, dict):
         for roll in role_ban_history.get("rolls", []):
-            if not isinstance(roll, dict):
+            if not isinstance(roll, dict) or not roll.get("confirmed_match_uid"):
                 continue
 
             def _uid(player_key):

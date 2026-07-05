@@ -116,8 +116,10 @@ from jarvis.stats.team_fairness import (
     candidate_pair_target_penalty as _nt_candidate_pair_target_penalty,
     candidate_role_ban_exposure_penalty as _nt_candidate_role_ban_exposure_penalty,
     dynamic_pair_lock_limit as _nt_dynamic_pair_lock_limit,
-    record_role_ban_exposure as _nt_record_role_ban_exposure,
+    queue_role_ban_roll as _nt_queue_role_ban_roll,
+    reconcile_role_ban_history as _nt_reconcile_role_ban_history_data,
     same_team_probability as _nt_same_team_probability,
+    uploaded_game_rows_to_team_records as _nt_uploaded_game_rows_to_team_records,
 )
 from jarvis.stats.sessions import (
     aggregate_wl_for_labels as _read_session_wl,
@@ -129,6 +131,10 @@ from jarvis.stats.team_size_records import (
     eligible_exact_2v2_labels as _team_size_eligible_exact_2v2_labels,
     eligible_min_4v4_labels as _team_size_eligible_min_4v4_labels,
     render_records_image as _team_size_render_records_image,
+)
+from jarvis.stats.team_role_bans import (
+    build_teammate_role_ban_matrix as _build_teammate_role_ban_matrix,
+    render_teammate_role_ban_matrix as _render_teammate_role_ban_matrix,
 )
 from jarvis.stats.top3 import load_human_match_rows as _load_top3_human_match_rows
 from jarvis.stats.top3_base import build_top3_base
@@ -462,6 +468,7 @@ def _serialize_session(session) -> dict:
             "low_team": sorted(list(session.pending_roll_data.get("low_team", []))) if session.pending_roll_data.get("low_team") else None,
             "restricted_roles": dict(session.pending_roll_data.get("restricted_roles") or {}) if session.pending_roll_data.get("restricted_roles") else None,
             "season_id": session.pending_roll_data.get("season_id"),
+            "generated_at_epoch": session.pending_roll_data.get("generated_at_epoch"),
         } if getattr(session, "pending_roll_data", None) else None),
         "pair_lock_47_disabled": bool(getattr(session, "pair_lock_47_disabled", False)),
         "pair_lock_47_disabled_lobby": (
@@ -535,6 +542,7 @@ def _apply_session_state(session, data: dict):
             "low_team": frozenset(prd.get("low_team") or []) if prd.get("low_team") else None,
             "restricted_roles": restricted_roles,
             "season_id": prd.get("season_id"),
+            "generated_at_epoch": prd.get("generated_at_epoch"),
         }
     else:
         session.pending_roll_data = None
@@ -14232,6 +14240,9 @@ async def season_movie_pack(ctx, season_id: int = None):
 
     sid = int(season_id) if season_id is not None else int(get_current_season_id())
 
+    # Confirm generated role-ban rolls against uploaded games before exporting.
+    _nt_reconcile_role_ban_history(sid)
+
     buf = await _smp_build_movie_pack_md(sid)
     if buf is None:
         await ctx.send("No season data found yet. Import matches first, then try again.")
@@ -16730,23 +16741,62 @@ def _nt_save_role_ban_history(season_id: int, history: dict) -> None:
     conn.commit()
 
 
-def _nt_record_committed_role_bans(
+def _nt_queue_committed_role_bans(
     *,
     season_id: int,
     team_a: frozenset[str],
     team_b: frozenset[str],
     restricted_roles: dict[str, str] | None,
+    generated_at_epoch: float,
 ) -> None:
     if not restricted_roles:
         return
     history = _nt_load_role_ban_history(season_id)
-    updated = _nt_record_role_ban_exposure(
+    updated = _nt_queue_role_ban_roll(
         history,
         team_a,
         team_b,
         restricted_roles,
+        generated_at_epoch=float(generated_at_epoch),
+        committed_at_epoch=time.time(),
     )
     _nt_save_role_ban_history(season_id, updated)
+
+
+def _nt_uploaded_games_for_role_ban_confirmation(season_id: int) -> list[dict]:
+    c.execute(
+        """
+        SELECT
+            pm.match_uid,
+            pm.game_label,
+            pm.player_uid,
+            pm.camp,
+            mm.match_time_utc,
+            mm.imported_at
+        FROM mr_player_match pm
+        LEFT JOIN mr_match_meta mm
+               ON mm.season_id = pm.season_id
+              AND mm.match_uid = pm.match_uid
+        WHERE pm.season_id=?
+          AND COALESCE(pm.is_bot, 0)=0
+        ORDER BY datetime(mm.imported_at) ASC, pm.rowid ASC
+        """,
+        (int(season_id),),
+    )
+
+    return _nt_uploaded_game_rows_to_team_records(c.fetchall() or [])
+
+
+def _nt_reconcile_role_ban_history(season_id: int) -> tuple[dict, int]:
+    history = _nt_load_role_ban_history(season_id)
+    try:
+        uploaded_games = _nt_uploaded_games_for_role_ban_confirmation(season_id)
+        updated, confirmed = _nt_reconcile_role_ban_history_data(history, uploaded_games)
+    except Exception:
+        return history, 0
+    if confirmed:
+        _nt_save_role_ban_history(season_id, updated)
+    return updated, confirmed
 
 
 def _nt_role_emoji(role: str) -> str:
@@ -16824,7 +16874,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
         restricted_roles = {p: random.choice(("Vanguard", "Duelist", "Strategist")) for p in active}
         role_restrict_debug = {}
 
-    role_ban_history = _nt_load_role_ban_history(season_id_now)
+    role_ban_history, _confirmed_role_ban_rolls = _nt_reconcile_role_ban_history(season_id_now)
 
     # Team sizes
     if n % 2 == 0:
@@ -17769,6 +17819,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
         "low_team": low_team,
         "restricted_roles": dict(restricted_roles or {}),
         "season_id": int(season_id_now),
+        "generated_at_epoch": time.time(),
     }
 
     view = NextTeamsControlsView(key)
@@ -18350,11 +18401,12 @@ def _commit_pending_roll_fallback(session: SessionState,
     })
 
     try:
-        _nt_record_committed_role_bans(
+        _nt_queue_committed_role_bans(
             season_id=season_id,
             team_a=team_a,
             team_b=team_b,
             restricted_roles=restricted_roles,
+            generated_at_epoch=float(data.get("generated_at_epoch") or time.time()),
         )
     except Exception:
         pass
@@ -18422,11 +18474,12 @@ def _commit_pending_roll(session: SessionState,
     })
 
     try:
-        _nt_record_committed_role_bans(
+        _nt_queue_committed_role_bans(
             season_id=season_id,
             team_a=team_a,
             team_b=team_b,
             restricted_roles=restricted_roles,
+            generated_at_epoch=float(data.get("generated_at_epoch") or time.time()),
         )
     except Exception:
         pass
@@ -19109,6 +19162,36 @@ async def next_teams(ctx):
     key = _get_session_key(ctx)
     await _run_next_teams_roll(ctx.channel, key, commit_pending=True)
 
+
+@bot.command(
+    name="teammate_role_bans",
+    aliases=["role_ban_matrix", "teammate_ban_matrix"],
+)
+async def teammate_role_bans(ctx):
+    """Show confirmed teammate role-ban exposure for the current season."""
+    season_id = int(get_current_season_id())
+    history, newly_confirmed = _nt_reconcile_role_ban_history(season_id)
+    names = _get_all_players_prefer_roster()
+    report = _build_teammate_role_ban_matrix(history, names)
+
+    if not report.get("confirmed_rolls"):
+        pending = len(history.get("pending_rolls", [])) if isinstance(history, dict) else 0
+        await ctx.send(
+            "No generated role-ban rolls have been confirmed by uploaded games yet. "
+            f"Pending confirmation: {pending}."
+        )
+        return
+
+    output = _render_teammate_role_ban_matrix(report, season_id)
+    message = None
+    if newly_confirmed:
+        message = f"Confirmed {newly_confirmed} generated roll(s) from uploaded games."
+    await ctx.send(
+        content=message,
+        file=discord.File(output, filename=f"teammate_role_bans_s{season_id}.png"),
+    )
+
+
 @bot.command(name='fairness_debug')
 async def fairness_debug(ctx):
     """Explain the last `!next_teams` result (season + session-aware)."""
@@ -19352,6 +19435,8 @@ async def helpme(ctx):
                  "Update active players for the current fairness session."),
                 ("!next_teams",
                  "Generate next teams using fairness-weighted randomisation."),
+                ("!teammate_role_bans",
+                 "Show teammate role-ban exposure confirmed against uploaded games. Aliases: !role_ban_matrix, !teammate_ban_matrix."),
                 ("!fairness_debug",
                  "Explain the last !next_teams result."),
             ],

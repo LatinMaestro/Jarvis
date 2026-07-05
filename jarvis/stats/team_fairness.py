@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 from itertools import combinations
 from typing import Mapping
 
 
 ROLE_BAN_HISTORY_VERSION = 1
 ROLE_BAN_KEY_SEPARATOR = "\x1f"
+ROLE_BAN_CONFIRM_WINDOW_SECONDS = 7 * 24 * 60 * 60
 
 
 def same_team_probability(team_a_size: int, team_b_size: int) -> float:
@@ -102,7 +104,12 @@ def role_ban_history_key(receiver: str, teammate: str, banned_role: str) -> str:
 
 def normalise_role_ban_history(value: object) -> dict:
     if not isinstance(value, dict):
-        return {"version": ROLE_BAN_HISTORY_VERSION, "entries": {}, "rolls": []}
+        return {
+            "version": ROLE_BAN_HISTORY_VERSION,
+            "entries": {},
+            "rolls": [],
+            "pending_rolls": [],
+        }
     entries = value.get("entries")
     if not isinstance(entries, dict):
         entries = {}
@@ -136,8 +143,131 @@ def normalise_role_ban_history(value: object) -> dict:
                 for player, role in restrictions.items()
                 if player and role
             },
+            "confirmed_match_uid": str(roll.get("confirmed_match_uid") or ""),
+            "confirmed_game_label": str(roll.get("confirmed_game_label") or ""),
         })
-    return {"version": ROLE_BAN_HISTORY_VERSION, "entries": clean, "rolls": rolls}
+
+    pending_rolls = []
+    for roll in value.get("pending_rolls", []):
+        if not isinstance(roll, dict):
+            continue
+        team_a = sorted(str(player) for player in roll.get("team_a", []) if player)
+        team_b = sorted(str(player) for player in roll.get("team_b", []) if player)
+        restrictions = roll.get("restricted_roles")
+        if not team_a or not team_b or not isinstance(restrictions, dict):
+            continue
+        try:
+            generated_at_epoch = float(roll.get("generated_at_epoch", 0.0))
+            committed_at_epoch = float(roll.get("committed_at_epoch", generated_at_epoch))
+        except (TypeError, ValueError):
+            continue
+        pending_rolls.append({
+            "sequence": len(pending_rolls) + 1,
+            "team_a": team_a,
+            "team_b": team_b,
+            "restricted_roles": {
+                str(player): str(role)
+                for player, role in restrictions.items()
+                if player and role
+            },
+            "generated_at_epoch": generated_at_epoch,
+            "committed_at_epoch": committed_at_epoch,
+        })
+    return {
+        "version": ROLE_BAN_HISTORY_VERSION,
+        "entries": clean,
+        "rolls": rolls,
+        "pending_rolls": pending_rolls,
+    }
+
+
+def queue_role_ban_roll(
+    history: object,
+    team_a: frozenset[str],
+    team_b: frozenset[str],
+    restricted_roles: Mapping[str, str],
+    *,
+    generated_at_epoch: float,
+    committed_at_epoch: float,
+) -> dict:
+    """Queue a committed UI roll until an uploaded game confirms its teams."""
+    updated = normalise_role_ban_history(history)
+    updated["pending_rolls"].append({
+        "sequence": len(updated["pending_rolls"]) + 1,
+        "team_a": sorted(team_a),
+        "team_b": sorted(team_b),
+        "restricted_roles": {
+            str(player): str(restricted_roles[player])
+            for player in sorted(restricted_roles)
+            if restricted_roles.get(player)
+        },
+        "generated_at_epoch": float(generated_at_epoch),
+        "committed_at_epoch": float(committed_at_epoch),
+    })
+    return updated
+
+
+def uploaded_game_rows_to_team_records(rows: list[tuple]) -> list[dict]:
+    """Convert read-only match rows into exact human-team confirmation records."""
+    by_match = {}
+    for source_row in rows or []:
+        if len(source_row) >= 6:
+            match_uid, game_label, player_uid, camp, match_time_utc, imported_at = source_row[:6]
+        else:
+            match_uid, game_label, player_uid, camp, imported_at = source_row[:5]
+            match_time_utc = None
+        if match_uid is None or player_uid is None or imported_at is None:
+            continue
+        key = str(match_uid)
+        row = by_match.setdefault(key, {
+            "match_uid": key,
+            "game_label": str(game_label or ""),
+            "match_time_utc": str(match_time_utc or ""),
+            "imported_at": str(imported_at),
+            "members": [],
+        })
+        try:
+            row["members"].append((f"u{int(player_uid)}", int(camp)))
+        except (TypeError, ValueError):
+            continue
+
+    games = []
+    for row in by_match.values():
+        camps = sorted({camp for _player, camp in row["members"]})
+        if camps and set(camps) <= {0, 1}:
+            side_map = {0: 0, 1: 1}
+        elif camps and set(camps) <= {1, 2}:
+            side_map = {1: 0, 2: 1}
+        elif len(camps) >= 2:
+            side_map = {camps[0]: 0, camps[1]: 1}
+        else:
+            continue
+
+        teams = {0: set(), 1: set()}
+        for player, camp in row["members"]:
+            side = side_map.get(camp)
+            if side in teams:
+                teams[side].add(player)
+        if not teams[0] or not teams[1]:
+            continue
+
+        try:
+            confirmation_time = row["match_time_utc"] or row["imported_at"]
+            imported_dt = datetime.fromisoformat(confirmation_time.replace("Z", "+00:00"))
+            if imported_dt.tzinfo is None:
+                imported_dt = imported_dt.replace(tzinfo=timezone.utc)
+            imported_epoch = imported_dt.astimezone(timezone.utc).timestamp()
+        except Exception:
+            continue
+
+        games.append({
+            "match_uid": row["match_uid"],
+            "game_label": row["game_label"],
+            "team_a": sorted(teams[0]),
+            "team_b": sorted(teams[1]),
+            "imported_at_epoch": imported_epoch,
+        })
+    return games
 
 
 def record_role_ban_exposure(
@@ -179,6 +309,87 @@ def record_role_ban_exposure(
         },
     })
     return updated
+
+
+def reconcile_role_ban_history(
+    history: object,
+    uploaded_games: list[dict],
+    *,
+    confirmation_window_seconds: float = ROLE_BAN_CONFIRM_WINDOW_SECONDS,
+) -> tuple[dict, int]:
+    """Confirm queued rolls against exact newly uploaded human team assignments."""
+    updated = normalise_role_ban_history(history)
+    games = []
+    for game in uploaded_games or []:
+        if not isinstance(game, dict):
+            continue
+        team_a = frozenset(str(player) for player in game.get("team_a", []) if player)
+        team_b = frozenset(str(player) for player in game.get("team_b", []) if player)
+        if not team_a or not team_b:
+            continue
+        try:
+            imported_at_epoch = float(game.get("imported_at_epoch", 0.0))
+        except (TypeError, ValueError):
+            continue
+        games.append({
+            "match_uid": str(game.get("match_uid") or ""),
+            "game_label": str(game.get("game_label") or ""),
+            "team_a": team_a,
+            "team_b": team_b,
+            "imported_at_epoch": imported_at_epoch,
+        })
+    games.sort(key=lambda row: (row["imported_at_epoch"], row["match_uid"]))
+
+    used_matches = {
+        str(roll.get("confirmed_match_uid") or "")
+        for roll in updated["rolls"]
+        if roll.get("confirmed_match_uid")
+    }
+    remaining = []
+    confirmed = 0
+
+    for pending in sorted(
+        updated["pending_rolls"],
+        key=lambda row: (row["generated_at_epoch"], row["sequence"]),
+    ):
+        generated_at = float(pending["generated_at_epoch"])
+        deadline = generated_at + max(0.0, float(confirmation_window_seconds))
+        expected_a = frozenset(pending["team_a"])
+        expected_b = frozenset(pending["team_b"])
+        match = None
+
+        for game in games:
+            if game["match_uid"] and game["match_uid"] in used_matches:
+                continue
+            if game["imported_at_epoch"] < generated_at or game["imported_at_epoch"] > deadline:
+                continue
+            exact = (
+                (game["team_a"] == expected_a and game["team_b"] == expected_b)
+                or (game["team_a"] == expected_b and game["team_b"] == expected_a)
+            )
+            if exact:
+                match = game
+                break
+
+        if match is None:
+            remaining.append(pending)
+            continue
+
+        before = len(updated["rolls"])
+        updated = record_role_ban_exposure(
+            updated,
+            expected_a,
+            expected_b,
+            pending["restricted_roles"],
+        )
+        updated["rolls"][before]["confirmed_match_uid"] = match["match_uid"]
+        updated["rolls"][before]["confirmed_game_label"] = match["game_label"]
+        if match["match_uid"]:
+            used_matches.add(match["match_uid"])
+        confirmed += 1
+
+    updated["pending_rolls"] = remaining
+    return normalise_role_ban_history(updated), confirmed
 
 
 def candidate_role_ban_exposure_penalty(
