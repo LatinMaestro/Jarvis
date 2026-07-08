@@ -448,3 +448,54 @@ def candidate_role_ban_exposure_penalty(
         "mean_weighted_squared_deviation": mean_squared,
         "records_scored": len(details),
     }
+
+
+def hero_versatility_deficit(
+    hero_seconds: Mapping[object, float],
+    *,
+    target_effective_heroes: float = 3.0,
+    sample_damp_seconds: float = 3600.0,
+) -> float:
+    """Return 0..1 where higher means a more concentrated hero pool."""
+    seconds = [
+        max(0.0, float(value or 0.0))
+        for value in (hero_seconds or {}).values()
+        if float(value or 0.0) > 0.0
+    ]
+    total = sum(seconds)
+    if total <= 0.0:
+        return 0.0
+
+    shares = [value / total for value in seconds]
+    effective_heroes = 1.0 / max(1e-9, sum(share * share for share in shares))
+    target = max(1.01, float(target_effective_heroes))
+    raw_deficit = max(0.0, target - effective_heroes) / (target - 1.0)
+    sample_weight = total / (total + max(0.0, float(sample_damp_seconds)))
+    return max(0.0, min(1.0, raw_deficit * sample_weight))
+
+
+def candidate_versatility_low_team_penalty(
+    team_a: frozenset[str],
+    team_b: frozenset[str],
+    low_team: frozenset[str] | None,
+    versatility_deficit: Mapping[str, float],
+    *,
+    low_team_reward_weight: float = 45.0,
+) -> tuple[float, dict]:
+    """
+    Light optional nudge: low-versatility players are slightly easier to place
+    on the smaller team in uneven lobbies.
+    """
+    active = sorted(set(team_a) | set(team_b))
+    if not active or not low_team:
+        return 0.0, {"low_team_reward": 0.0, "low_team_deficit": 0.0}
+
+    low_deficit = sum(
+        max(0.0, float(versatility_deficit.get(player, 0.0) or 0.0))
+        for player in low_team
+    )
+    reward = float(low_team_reward_weight) * low_deficit
+    return -reward, {
+        "low_team_reward": reward,
+        "low_team_deficit": low_deficit,
+    }

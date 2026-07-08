@@ -3,7 +3,9 @@ import unittest
 from jarvis.stats.team_fairness import (
     candidate_pair_target_penalty,
     candidate_role_ban_exposure_penalty,
+    candidate_versatility_low_team_penalty,
     dynamic_pair_lock_limit,
+    hero_versatility_deficit,
     queue_role_ban_roll,
     reconcile_role_ban_history,
     record_role_ban_exposure,
@@ -233,6 +235,40 @@ class TeamFairnessTests(unittest.TestCase):
             frozenset(("a", "b")), frozenset(("c", "d")), restrictions, history
         )
         self.assertLess(split_pair, keep_pair)
+
+    def test_hero_versatility_deficit_is_higher_for_one_tricks(self):
+        one_trick = hero_versatility_deficit({"h1": 7200, "h2": 300})
+        broad_pool = hero_versatility_deficit({"h1": 2500, "h2": 2400, "h3": 2300})
+        self.assertGreater(one_trick, broad_pool)
+        self.assertGreaterEqual(one_trick, 0.0)
+        self.assertLessEqual(one_trick, 1.0)
+
+    def test_versatility_penalty_slightly_rewards_low_team_assignment(self):
+        deficits = {"a": 0.8, "b": 0.1, "c": 0.0, "d": 0.0, "e": 0.0}
+        low_with_one_trick, meta = candidate_versatility_low_team_penalty(
+            frozenset(("a", "b")),
+            frozenset(("c", "d", "e")),
+            frozenset(("a", "b")),
+            deficits,
+        )
+        low_without_one_trick, _ = candidate_versatility_low_team_penalty(
+            frozenset(("a", "b", "c")),
+            frozenset(("d", "e")),
+            frozenset(("d", "e")),
+            deficits,
+        )
+        self.assertLess(low_with_one_trick, low_without_one_trick)
+        self.assertGreater(meta["low_team_reward"], 0.0)
+
+    def test_versatility_penalty_is_noop_for_even_games(self):
+        score, meta = candidate_versatility_low_team_penalty(
+            frozenset(("a", "b")),
+            frozenset(("c", "d")),
+            None,
+            {"a": 1.0},
+        )
+        self.assertEqual(score, 0.0)
+        self.assertEqual(meta["low_team_reward"], 0.0)
 
 
 if __name__ == "__main__":

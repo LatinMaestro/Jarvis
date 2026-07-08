@@ -115,7 +115,9 @@ from jarvis.stats.season_fairness_export import load_fairness_replay
 from jarvis.stats.team_fairness import (
     candidate_pair_target_penalty as _nt_candidate_pair_target_penalty,
     candidate_role_ban_exposure_penalty as _nt_candidate_role_ban_exposure_penalty,
+    candidate_versatility_low_team_penalty as _nt_candidate_versatility_low_team_penalty,
     dynamic_pair_lock_limit as _nt_dynamic_pair_lock_limit,
+    hero_versatility_deficit as _nt_hero_versatility_deficit,
     queue_role_ban_roll as _nt_queue_role_ban_roll,
     reconcile_role_ban_history as _nt_reconcile_role_ban_history_data,
     same_team_probability as _nt_same_team_probability,
@@ -16563,6 +16565,68 @@ async def _nt_load_role_seconds_from_db(season_id: int, player_uids: set[int]) -
     return out
 
 
+def _nt_load_hero_versatility_deficits_from_db(season_id: int, active_pkeys: list[str]) -> dict[str, float]:
+    """
+    Return player_key -> low-versatility deficit.
+    Higher values mean the player's season hero time is more concentrated.
+    """
+    global c
+    ensure_mr_api_tables()
+
+    if not (_nt_table_exists("mr_hero_segments") and _nt_table_exists("mr_player_match")):
+        return {}
+
+    uid_to_pkey = {}
+    for pkey in active_pkeys or []:
+        uid = _uid_from_pkey(pkey)
+        if uid is not None:
+            uid_to_pkey[int(uid)] = str(pkey)
+    if not uid_to_pkey:
+        return {}
+
+    where_bot = ""
+    if _nt_col_exists("mr_player_match", "is_bot"):
+        where_bot = "AND COALESCE(pm.is_bot,0)=0"
+
+    uid_q = ",".join("?" for _ in uid_to_pkey)
+    params = [int(season_id), *sorted(uid_to_pkey)]
+
+    try:
+        c.execute(f"""
+            SELECT hs.player_uid, hs.hero_id, SUM(COALESCE(hs.seconds,0)) AS sec
+            FROM mr_hero_segments hs
+            JOIN mr_player_match pm
+              ON pm.season_id  = hs.season_id
+             AND pm.match_uid  = hs.match_uid
+             AND pm.game_label = hs.game_label
+             AND pm.player_uid = hs.player_uid
+            WHERE hs.season_id = ?
+              {where_bot}
+              AND hs.player_uid IN ({uid_q})
+            GROUP BY hs.player_uid, hs.hero_id
+            HAVING sec > 0
+        """, tuple(params))
+        rows = c.fetchall() or []
+    except Exception:
+        return {}
+
+    by_player = defaultdict(dict)
+    for uid, hero_id, sec in rows:
+        try:
+            uid_i = int(uid)
+            seconds = float(sec or 0.0)
+        except Exception:
+            continue
+        if seconds <= 0.0 or uid_i not in uid_to_pkey:
+            continue
+        by_player[uid_i][str(hero_id)] = by_player[uid_i].get(str(hero_id), 0.0) + seconds
+
+    return {
+        uid_to_pkey[uid]: _nt_hero_versatility_deficit(hero_seconds)
+        for uid, hero_seconds in by_player.items()
+    }
+
+
 def _nt_apply_session_virtual_overlay(*, active_set: set[str], session_games: list[dict], sec_by_pkey: dict[str, dict]):
     """
     Session carry-over:
@@ -16876,6 +16940,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
         role_restrict_debug = {}
 
     role_ban_history, _confirmed_role_ban_rolls = _nt_reconcile_role_ban_history(season_id_now)
+    hero_versatility_deficits = _nt_load_hero_versatility_deficits_from_db(season_id_now, active)
 
     # Team sizes
     if n % 2 == 0:
@@ -17626,6 +17691,12 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
                 restricted_roles,
                 role_ban_history,
             )
+            versatility_pen, versatility_meta = _nt_candidate_versatility_low_team_penalty(
+                team_a,
+                team_b,
+                low_team,
+                hero_versatility_deficits,
+            )
 
             total_score = (
                 float(base_score)
@@ -17635,6 +17706,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
                 + float(target_pair_pen)
                 + float(role_pen)
                 + float(role_ban_exposure_pen)
+                + float(versatility_pen)
             )
 
             meta = {
@@ -17658,6 +17730,9 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
                 "role_ban_exposure_penalty": float(role_ban_exposure_pen),
                 "role_ban_exposure_max_deviation": float(role_ban_exposure_meta.get("max_weighted_deviation", 0.0)),
                 "role_ban_exposure_mean_squared_deviation": float(role_ban_exposure_meta.get("mean_weighted_squared_deviation", 0.0)),
+                "hero_versatility_penalty": float(versatility_pen),
+                "hero_versatility_low_team_reward": float(versatility_meta.get("low_team_reward", 0.0)),
+                "hero_versatility_low_team_deficit": float(versatility_meta.get("low_team_deficit", 0.0)),
                 "pair_lock_47_enforced": bool(enforce_pair_lock),
                 "low_post_abs": float(low_post_abs),
                 "low_post_max": float(low_post_max),
