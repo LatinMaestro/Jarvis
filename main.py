@@ -17852,7 +17852,7 @@ def _uid_from_pkey(pkey: str) -> int | None:
 def _format_predicted_win_line(team_a: frozenset[str], team_b: frozenset[str]) -> str:
     """Return a fake, close predicted win chance line for the next-teams joke."""
     nev_key = _pkey_from_uid(120747082)
-    spread = random.uniform(5.0, 10.0)
+    spread = random.uniform(0.0, 7.0)
     higher = 50.0 + (spread / 2.0)
     lower = 100.0 - higher
 
