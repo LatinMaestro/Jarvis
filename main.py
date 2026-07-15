@@ -17798,11 +17798,11 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
             label_b += " — low team"
 
     lines = [f"**Next Teams (with role restrictions) (score {base_score:.3f})**"]
-    if predicted_line:
-        lines.append(predicted_line)
-
     # Show which option was chosen from the Top-K pool
     lines.append(f"🎲 Picked **#{picked_rank} of {picked_pool}**")
+
+    if predicted_line:
+        lines.append(predicted_line)
 
     def _disp_with_restrict(p: str) -> str:
         return f"{disp(p)} ({_nt_role_emoji((restricted_roles or {}).get(p))})"
@@ -17847,6 +17847,28 @@ def _uid_from_pkey(pkey: str) -> int | None:
     except Exception:
         pass
     return None
+
+
+def _format_predicted_win_line(team_a: frozenset[str], team_b: frozenset[str]) -> str:
+    """Return a fake, close predicted win chance line for the next-teams joke."""
+    nev_key = _pkey_from_uid(120747082)
+    spread = random.uniform(5.0, 10.0)
+    higher = 50.0 + (spread / 2.0)
+    lower = 100.0 - higher
+
+    if nev_key in team_a:
+        team_a_pct, team_b_pct = higher, lower
+    elif nev_key in team_b:
+        team_a_pct, team_b_pct = lower, higher
+    elif random.choice((True, False)):
+        team_a_pct, team_b_pct = higher, lower
+    else:
+        team_a_pct, team_b_pct = lower, higher
+
+    return (
+        "**Predicted Win Chance:** "
+        f"Team 1 {team_a_pct:.1f}% vs Team 2 {team_b_pct:.1f}%"
+    )
 
 
 def _get_all_players() -> dict[str, str]:
