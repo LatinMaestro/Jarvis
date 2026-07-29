@@ -12241,6 +12241,7 @@ except Exception:
 # -----------------------------
 SS_TOP_ACTIVE = 5
 SS_TOP_VERSATILE = 5
+SS_VERSATILITY_MIN_HERO_SECONDS = 300
 SS_TOP_BOT_HEROES = 5
 SS_MIN_HALF_GAMES = 3
 SS_TOP_IMPROVED = 5
@@ -12810,10 +12811,18 @@ def _ss_most_versatile_from_segments(season_id: int, top_n: int = SS_TOP_VERSATI
     SELECT player_uid, hero_id, SUM(seconds) AS sec_elig
     FROM elig
     GROUP BY player_uid, hero_id
-    HAVING sec_elig > 0
+    HAVING sec_elig >= ?
     """
     try:
-        c.execute(sql, (int(season_id), int(HERO_WIN_MIN_SECONDS), float(HERO_WIN_MIN_RATIO)))
+        c.execute(
+            sql,
+            (
+                int(season_id),
+                int(HERO_WIN_MIN_SECONDS),
+                float(HERO_WIN_MIN_RATIO),
+                int(SS_VERSATILITY_MIN_HERO_SECONDS),
+            ),
+        )
         rows = c.fetchall() or []
     except Exception:
         return []
