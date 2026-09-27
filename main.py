@@ -8257,7 +8257,7 @@ async def session_overview(ctx, date_str: str = None):
 #   Dumps ALL session_overview outputs for the current season into one thread (or channel fallback).
 #
 # Notes:
-# - Uses the same Brisbane-local date grouping the bot already applies for session_overview.
+# - Uses the same 12-hour play-session grouping as session_overview.
 # - Sends the same two images per session as !session_overview (overview + matrix/meta).
 # ============================================================================================================
 
@@ -8299,22 +8299,12 @@ async def _send_session_overview_to_channel(channel, *, season_id: int, date_str
         except Exception:
             return str(hid_any)
 
-    # --- Standings delta (before vs after session) ---
-    all_labels = _all_ordered_game_labels_api(season_id)
-    first_lab, last_lab = session_labels[0], session_labels[-1]
-
-    try:
-        first_idx = all_labels.index(first_lab)
-        last_idx = all_labels.index(last_lab)
-    except ValueError:
-        first_idx, last_idx = 0, len(all_labels) - 1
-
-    before_subset = all_labels[:first_idx]
-    after_subset = all_labels[:last_idx + 1]
-
-    prev_df = _aggregate_wl_for_labels_api(season_id, before_subset) if before_subset else None
-    after_df = _aggregate_wl_for_labels_api(season_id, after_subset)
-    after_df = _add_rank_deltas(after_df, prev_df)
+    # Keep the bulk output identical to !session_overview and !leaderboard_image.
+    after_df = _read_season_standings(c, season_id)
+    if not after_df.empty:
+        after_df = after_df.copy()
+        after_df["rank"] = range(1, len(after_df) + 1)
+        after_df["delta"] = "="
 
     # --- Image 1 ---
     img1 = _render_session_overview_image_api(sess_date, session_labels, session_df, after_df)
@@ -8353,7 +8343,7 @@ async def season_overviews(ctx, season_id: int = None):
 
     sid = int(season_id) if season_id is not None else int(get_current_season_id())
 
-    # Find all Brisbane-local session dates (same grouping used by session_overview)
+    # Find all 12-hour play sessions (same grouping used by session_overview)
     try:
         ordered_dates, by_date = _get_games_grouped_by_date_api(sid)
     except Exception:
