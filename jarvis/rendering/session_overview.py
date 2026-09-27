@@ -238,7 +238,7 @@ def render_session_overview(session_date, session_labels, session_df, standings_
     y = draw_table(y, A_headers, A_rows, A_col)
 
     y += section_gap
-    d.text((pad, y), "Season Standings (change after session)", font=body_font, fill=gold)
+    d.text((pad, y), "Season Standings (same W/L as !leaderboard_image)", font=body_font, fill=gold)
     y += 28
     y_b_table_top = y
     y_b_table_end = draw_table(y, B_headers, B_rows, B_col)
