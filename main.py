@@ -125,6 +125,7 @@ from jarvis.stats.sessions import (
     aggregate_wl_for_labels as _read_session_wl,
     load_all_ordered_game_labels,
     load_games_grouped_by_local_date,
+    load_human_season_standings as _read_season_standings,
 )
 from jarvis.stats.team_size_records import (
     aggregate_records as _team_size_aggregate_records,
@@ -7450,8 +7451,9 @@ def _norm(name: str) -> str:
 
 def _get_games_grouped_by_date_api(season_id: int):
     """
-    Groups by Brisbane-local date using match_imports.imported_at (UTC) shifted +10h.
-    Returns: ordered_dates, by_date dict[date_str] -> [game_label,...] (chronological)
+    Groups games into sessions separated by more than 12 hours.
+    Uses the true match-play timestamp where available and import time only as
+    a fallback. Session keys are the Brisbane-local start date.
     """
     ensure_mr_api_tables()
 
@@ -8177,7 +8179,8 @@ def _render_session_overview_image_api(session_date, session_labels, session_df,
 async def session_overview(ctx, date_str: str = None):
     """
     API-native session overview (enhanced).
-    Session definition: all imported matches on a Brisbane-local date (from match_imports.imported_at).
+    Session definition: consecutive games with no gap greater than 12 hours.
+    Sessions can cross Brisbane midnight and can span multiple auto-import runs.
     Usage:
       !session_overview
       !session_overview 2026-01-05
@@ -8218,23 +8221,14 @@ async def session_overview(ctx, date_str: str = None):
         except Exception:
             return str(hid_any)
 
-    # --- Standings delta (before vs after session) ---
-    all_labels = _all_ordered_game_labels_api(season_id)
-    first_lab, last_lab = session_labels[0], session_labels[-1]
-
-    try:
-        first_idx = all_labels.index(first_lab)
-        last_idx = all_labels.index(last_lab)
-    except ValueError:
-        first_idx, last_idx = 0, len(all_labels) - 1
-
-    before_subset = all_labels[:first_idx]
-    after_subset = all_labels[:last_idx + 1]
-
-    prev_df = _aggregate_wl_for_labels_api(
-        season_id, before_subset) if before_subset else None
-    after_df = _aggregate_wl_for_labels_api(season_id, after_subset)
-    after_df = _add_rank_deltas(after_df, prev_df)
+    # Use the exact W/L source and aggregation rules used by !leaderboard_image.
+    # This intentionally shows the current full-season totals, independent of
+    # when the selected session was imported.
+    after_df = _read_season_standings(c, season_id)
+    if not after_df.empty:
+        after_df = after_df.copy()
+        after_df["rank"] = range(1, len(after_df) + 1)
+        after_df["delta"] = "="
 
     # --- Image 1 ---
     img1 = _render_session_overview_image_api(sess_date, session_labels,
