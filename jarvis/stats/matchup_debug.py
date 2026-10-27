@@ -47,7 +47,9 @@ def format_matchup_diversity_debug(info):
             f"- Best unused candidate: {best_unused:.3f} "
             f"(+{best_unused - best:.3f} from fairness best)"
         )
-    if "tolerance_limit" in info:
+    if info.get("tolerance_enabled") is False:
+        lines.append("- Fairness tolerance: disabled (unused eligible matchups take priority)")
+    elif "tolerance_limit" in info:
         lines.append(
             f"- Fairness tolerance ceiling: {float(info['tolerance_limit']):.3f}"
         )
@@ -58,6 +60,8 @@ def format_matchup_diversity_debug(info):
     if number("selected_repeat_count") > 0:
         if number("unused_eligible") > 0:
             lines.append("- Repetition reason: inspect selection/debug (unused acceptable alternatives existed).")
+        elif number("unused_scored") > 0 and info.get("tolerance_enabled") is False:
+            lines.append("- WARNING: unused scored alternatives existed despite a repeat; check history and selector.")
         elif number("unused_scored") > 0:
             lines.append("- Repetition reason: unused scored alternatives exceeded the fairness tolerance.")
         else:
