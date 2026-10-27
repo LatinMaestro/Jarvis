@@ -62,14 +62,14 @@ class MatchupHistoryTests(unittest.TestCase):
         self.assertEqual(chosen[1], 2)
         self.assertEqual(debug["selected_repeat_count"], 0)
 
-    def test_preserves_best_when_alternative_is_unfair(self):
+    def test_prefers_unused_even_with_large_fairness_gap(self):
         a = {"team_a": ["u1", "u2"], "team_b": ["u3", "u4"]}
         b = {"team_a": ["u1", "u3"], "team_b": ["u2", "u4"]}
         chosen, _ = choose_diverse_candidate(
-            [(100, 1, a), (200, 2, b)],
+            [(100, 1, a), (2939.410, 2, b)],
             {matchup_key(a["team_a"], a["team_b"]): 8}
         )
-        self.assertEqual(chosen[1], 1)
+        self.assertEqual(chosen[1], 2)
 
     def test_least_repeated_when_all_used(self):
         a = {"team_a": ["u1", "u2"], "team_b": ["u3", "u4"]}
@@ -77,6 +77,20 @@ class MatchupHistoryTests(unittest.TestCase):
         history = {matchup_key(a["team_a"], a["team_b"]): 3,
                    matchup_key(b["team_a"], b["team_b"]): 1}
         chosen, _ = choose_diverse_candidate([(100, 1, a), (110, 2, b)], history)
+        self.assertEqual(chosen[1], 2)
+
+    def test_fairness_tiebreaks_equally_unplayed(self):
+        a = {"team_a": ["u1", "u2"], "team_b": ["u3", "u4"]}
+        b = {"team_a": ["u1", "u3"], "team_b": ["u2", "u4"]}
+        chosen, _ = choose_diverse_candidate([(300, 1, a), (110, 2, b)], {})
+        self.assertEqual(chosen[1], 2)
+
+    def test_fairness_tiebreaks_equally_repeated(self):
+        a = {"team_a": ["u1", "u2"], "team_b": ["u3", "u4"]}
+        b = {"team_a": ["u1", "u3"], "team_b": ["u2", "u4"]}
+        history = {matchup_key(a["team_a"], a["team_b"]): 2,
+                   matchup_key(b["team_a"], b["team_b"]): 2}
+        chosen, _ = choose_diverse_candidate([(100, 1, a), (95, 2, b)], history)
         self.assertEqual(chosen[1], 2)
 
     def test_empty_pool_does_not_raise(self):
