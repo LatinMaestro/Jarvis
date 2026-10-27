@@ -89,34 +89,42 @@ def combined_matchup_counts(imported, session_games, season_id, match_window_sec
     return counts
 
 
-def choose_diverse_candidate(scored_candidates, history_counts, absolute_tolerance=25.0,
-                             relative_tolerance=0.03):
-    """Choose least repeated candidate within a narrow band of best fairness.
+def choose_diverse_candidate(scored_candidates, history_counts):
+    """Choose the least-used eligible exact-lobby matchup, fairness as tie-breaker.
 
-    Entries are (score, internal_id, metadata). All fairness hard-filtering must
-    occur BEFORE calling this function. The best-scoring option always remains
-    eligible, so diversity cannot make team generation fail.
+    All existing hard eligibility restrictions and fairness scoring must run
+    BEFORE this function. A never-played combination always outranks a played
+    combination, regardless of score difference. Once every eligible matchup
+    has been used, prefer the least-played; among equally played candidates,
+    use the existing (lower-is-better) fairness score.
     """
     if not scored_candidates:
         return None, {"eligible": 0, "reason": "no_candidates"}
-    baseline = min(scored_candidates, key=lambda item: (item[0], item[1]))
-    limit = baseline[0] + max(float(absolute_tolerance),
-                              abs(float(baseline[0])) * float(relative_tolerance))
-    eligible = [entry for entry in scored_candidates if entry[0] <= limit]
+
     def frequency(entry):
         try:
             meta = entry[2]
             return int(history_counts.get(matchup_key(meta["team_a"], meta["team_b"]), 0))
         except (KeyError, ValueError, TypeError):
             return 0
-    picked = min(eligible, key=lambda entry: (frequency(entry), entry[0], entry[1]))
+
+    baseline = min(scored_candidates, key=lambda entry: (entry[0], entry[1]))
+    picked = min(
+        scored_candidates,
+        key=lambda entry: (frequency(entry), entry[0], entry[1]),
+    )
+    unused = sum(frequency(entry) == 0 for entry in scored_candidates)
     return picked, {
-        "eligible": len(eligible),
+        "eligible": len(scored_candidates),
         "evaluated": len(scored_candidates),
         "fairness_best": float(baseline[0]),
         "fairness_selected": float(picked[0]),
         "selected_repeat_count": frequency(picked),
         "best_repeat_count": frequency(baseline),
-        "unused_eligible": sum(frequency(entry) == 0 for entry in eligible),
-        "reason": "diversity" if picked != baseline else "best_fairness",
+        "unused_eligible": unused,
+        "unused_scored": unused,
+        "tolerance_enabled": False,
+        "reason": "unused_first" if frequency(picked) == 0 and frequency(baseline) > 0
+                  else ("least_repeated" if frequency(picked) > 0 and picked != baseline
+                        else "best_fairness"),
     }
