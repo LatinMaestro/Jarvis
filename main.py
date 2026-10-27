@@ -112,7 +112,8 @@ from jarvis.stats.seasons import (
     season_game_count as _read_season_game_count,
 )
 from jarvis.stats.season_fairness_export import load_fairness_replay
-from jarvis.stats.matchup_history import imported_matchups, combined_matchup_counts, choose_diverse_candidate
+from jarvis.stats.matchup_history import imported_matchups, combined_matchup_counts, choose_diverse_candidate, matchup_key
+from jarvis.stats.matchup_debug import format_matchup_diversity_debug
 from jarvis.stats.team_fairness import (
     candidate_pair_target_penalty as _nt_candidate_pair_target_penalty,
     candidate_role_ban_exposure_penalty as _nt_candidate_role_ban_exposure_penalty,
@@ -16963,6 +16964,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
     # Imported exact-lobby history plus restart-safe session rolls. Failure must
     # never prevent the existing fairness engine from generating teams.
     matchup_history = {}
+    history_source_error = False
     try:
         c.execute("""
             SELECT pm.match_uid, pm.player_uid, pm.camp, mm.match_time_utc
@@ -16976,6 +16978,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
             imported_history, session.session_games or [], season_id_now
         )
     except Exception:
+        history_source_error = True
         try:
             matchup_history = combined_matchup_counts([], session.session_games or [], season_id_now)
         except Exception:
@@ -17702,13 +17705,27 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
         else:
             pick_idx = random.choices(range(len(top)), weights=weights_used, k=1)[0]
 
-    # Existing scores and hard constraints are unchanged. Only select a
-    # less-repeated configuration when its score is close to the best.
+    # Diagnostic metadata only; existing fairness and selection remain unchanged.
     diversity_debug = {}
     try:
-        diverse, diversity_debug = choose_diverse_candidate(
+        best_fairness = min(score for score, _i, _m in scored_candidates)
+        unused_scores = [
+            score for score, _i, candidate in scored_candidates
+            if not matchup_history.get(matchup_key(candidate["team_a"], candidate["team_b"]), 0)
+        ]
+        diversity_debug = {
+            "unused_scored": len(unused_scores),
+            "best_unused_score": min(unused_scores) if unused_scores else None,
+            "tolerance_limit": best_fairness + max(25.0, abs(best_fairness) * 0.03),
+            "history_source_error": history_source_error,
+        }
+    except Exception:
+        diversity_debug = {"history_source_error": history_source_error}
+    try:
+        diverse, selection_debug = choose_diverse_candidate(
             scored_candidates, matchup_history
         )
+        diversity_debug.update(selection_debug)
     except Exception:
         diverse = None
     if diverse is not None:
@@ -19249,6 +19266,8 @@ async def fairness_debug(ctx):
     lines.append(f"Base score (season pair + low-team): {float(dbg.get('total_score', 0.0)):.4f}")
     lines.append(f"Season pair penalty (raw): {float(dbg.get('season_pair_penalty', 0.0)):.4f}")
     lines.append(f"Low-team penalty (raw): {float(dbg.get('low_team_penalty', 0.0)):.4f}")
+    lines.append("")
+    lines.extend(format_matchup_diversity_debug(dbg.get("matchup_diversity")))
 
     if dbg.get("target_low") is not None:
         lines.append(f"Target low-team rate this lobby: {float(dbg.get('target_low', 0.0)):.3f}")
