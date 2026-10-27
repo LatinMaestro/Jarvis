@@ -112,6 +112,7 @@ from jarvis.stats.seasons import (
     season_game_count as _read_season_game_count,
 )
 from jarvis.stats.season_fairness_export import load_fairness_replay
+from jarvis.stats.matchup_history import imported_matchups, combined_matchup_counts, choose_diverse_candidate
 from jarvis.stats.team_fairness import (
     candidate_pair_target_penalty as _nt_candidate_pair_target_penalty,
     candidate_role_ban_exposure_penalty as _nt_candidate_role_ban_exposure_penalty,
@@ -504,6 +505,7 @@ def _apply_session_state(session, data: dict):
             "low_team": low_team,
             "restricted_roles": restricted_roles,
             "season_id": g.get("season_id"),
+            "generated_at_epoch": g.get("generated_at_epoch"),
         })
 
     # Low-team counts
@@ -16958,23 +16960,26 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
     def _pair_key(a: str, b: str) -> tuple[str, str]:
         return (a, b) if a < b else (b, a)
 
-    # Avoid exact repeats only within the current lobby composition
-    current_lobby_players = frozenset(active)
-    previous_teams = set()
-
-    for g in (session.session_games or []):
-        team_a_prev = frozenset(g.get("team_a") or [])
-        team_b_prev = frozenset(g.get("team_b") or [])
-        game_lobby_players = team_a_prev | team_b_prev
-
-        # Reset the no-repeat pool whenever the lobby membership changes.
-        # This keeps exact-team bans scoped to the current active player set,
-        # while all session/season pair tracking still continues normally.
-        if game_lobby_players != current_lobby_players:
-            continue
-
-        previous_teams.add(team_a_prev)
-        previous_teams.add(team_b_prev)
+    # Imported exact-lobby history plus restart-safe session rolls. Failure must
+    # never prevent the existing fairness engine from generating teams.
+    matchup_history = {}
+    try:
+        c.execute("""
+            SELECT pm.match_uid, pm.player_uid, pm.camp, mm.match_time_utc
+            FROM mr_player_match pm
+            LEFT JOIN mr_match_meta mm
+              ON mm.season_id=pm.season_id AND mm.match_uid=pm.match_uid
+            WHERE pm.season_id=? AND COALESCE(pm.is_bot, 0)=0
+        """, (int(season_id_now),))
+        imported_history = imported_matchups(c.fetchall() or [])
+        matchup_history = combined_matchup_counts(
+            imported_history, session.session_games or [], season_id_now
+        )
+    except Exception:
+        try:
+            matchup_history = combined_matchup_counts([], session.session_games or [], season_id_now)
+        except Exception:
+            matchup_history = {}
 
     # =====================================================================================
     # Effective (season + committed session) stats for pairing + low-team steering
@@ -17502,12 +17507,10 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
 
     def _build_top_heap(*, enforce_pair_lock: bool):
         best_heap = []
+        scored_candidates = []
         heap_i = 0
 
         for team_a, team_b in _iter_candidates():
-            if team_a in previous_teams or team_b in previous_teams:
-                continue
-
             if enforce_pair_lock and (_team_has_hard_locked_pair(team_a) or _team_has_hard_locked_pair(team_b)):
                 continue
 
@@ -17654,6 +17657,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
 
             heap_i += 1
             entry = (-total_score, heap_i, meta)
+            scored_candidates.append((total_score, heap_i, meta))
 
             if len(best_heap) < int(RAND_PICK_TOP_K):
                 heapq.heappush(best_heap, entry)
@@ -17661,17 +17665,17 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
                 if entry[0] > best_heap[0][0]:
                     heapq.heapreplace(best_heap, entry)
 
-        return best_heap
+        return best_heap, scored_candidates
 
     pair_lock_enforced = bool(hard_locked_pairs)
-    best_heap = _build_top_heap(enforce_pair_lock=pair_lock_enforced)
+    best_heap, scored_candidates = _build_top_heap(enforce_pair_lock=pair_lock_enforced)
 
     if not best_heap and pair_lock_enforced:
         session.pair_lock_47_disabled = True
         session.pair_lock_47_disabled_lobby = tuple(sorted(active))
         pair_lock_auto_disabled_this_roll = True
         hard_locked_pairs = set()
-        best_heap = _build_top_heap(enforce_pair_lock=False)
+        best_heap, scored_candidates = _build_top_heap(enforce_pair_lock=False)
         try:
             _save_session_state(key, session)
         except Exception:
@@ -17698,9 +17702,26 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
         else:
             pick_idx = random.choices(range(len(top)), weights=weights_used, k=1)[0]
 
-    picked_total, picked_internal_id, picked = top[pick_idx]
-    picked_rank = pick_idx + 1
-    picked_pool = len(top)
+    # Existing scores and hard constraints are unchanged. Only select a
+    # less-repeated configuration when its score is close to the best.
+    diversity_debug = {}
+    try:
+        diverse, diversity_debug = choose_diverse_candidate(
+            scored_candidates, matchup_history
+        )
+    except Exception:
+        diverse = None
+    if diverse is not None:
+        picked_total, picked_internal_id, picked = diverse
+        picked_pool = len(scored_candidates)
+        picked_rank = 1 + sum(
+            (score, internal_id) < (picked_total, picked_internal_id)
+            for score, internal_id, _meta in scored_candidates
+        )
+    else:
+        picked_total, picked_internal_id, picked = top[pick_idx]
+        picked_rank = pick_idx + 1
+        picked_pool = len(top)
 
 
     team_a = picked["team_a"]
@@ -17730,6 +17751,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
         debug_info["steep_low_bias"] = picked.get("low_bias", 0.0)
         debug_info["steep_extra_total"] = picked.get("extra_total", 0.0)
         debug_info["total_with_steep_terms"] = float(picked_total)
+        debug_info["matchup_diversity"] = diversity_debug
         debug_info["topk_pool"] = int(picked_pool)
         debug_info["topk_rank_picked"] = int(picked_rank)
         debug_info["topk_weights_used"] = list(weights_used)
@@ -18405,6 +18427,7 @@ def _commit_pending_roll_fallback(session: SessionState,
         "low_team": low_team,
         "restricted_roles": restricted_roles,
         "season_id": season_id,
+        "generated_at_epoch": data.get("generated_at_epoch"),
     })
 
     try:
@@ -18478,6 +18501,7 @@ def _commit_pending_roll(session: SessionState,
         "low_team": low_team,
         "restricted_roles": restricted_roles,
         "season_id": season_id,
+        "generated_at_epoch": data.get("generated_at_epoch"),
     })
 
     try:
