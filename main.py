@@ -17716,7 +17716,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
         diversity_debug = {
             "unused_scored": len(unused_scores),
             "best_unused_score": min(unused_scores) if unused_scores else None,
-            "tolerance_limit": best_fairness + max(25.0, abs(best_fairness) * 0.03),
+            "tolerance_enabled": False,
             "history_source_error": history_source_error,
         }
     except Exception:

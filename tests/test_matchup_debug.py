@@ -32,6 +32,15 @@ class MatchupDebugTests(unittest.TestCase):
         })
         self.assertNotIn("Repetition reason", "\n".join(lines))
 
+    def test_no_tolerance_reports_unused_first_policy(self):
+        lines = format_matchup_diversity_debug({
+            "selected_repeat_count": 0, "best_repeat_count": 4,
+            "evaluated": 10, "eligible": 10, "unused_eligible": 4,
+            "unused_scored": 4, "tolerance_enabled": False,
+        })
+        self.assertIn("tolerance: disabled", "\\n".join(lines))
+        self.assertNotIn("tolerance ceiling", "\\n".join(lines))
+
     def test_missing_data(self):
         self.assertIn("unavailable", " ".join(format_matchup_diversity_debug(None)))
 
