@@ -17820,9 +17820,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
         elif low_team == team_b:
             label_b += " — low team"
 
-    lines = [f"**Next Teams (with role restrictions) (score {base_score:.3f})**"]
-    # Show which option was chosen from the Top-K pool
-    lines.append(f"🎲 Picked **#{picked_rank} of {picked_pool}**")
+    lines = ["**Next Teams**"]
 
     if predicted_line:
         lines.append(predicted_line)
