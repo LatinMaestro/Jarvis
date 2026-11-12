@@ -93,5 +93,11 @@ class GolfReshuffleTests(unittest.TestCase):
         )
         self.assertIn('"restricted_roles": dict(restricted_roles or {})', source)
 
+    def test_paid_reshuffle_excludes_identical_pending_split(self):
+        from pathlib import Path
+        source = (Path(__file__).resolve().parents[1] / "main.py").read_text()
+        self.assertIn("matchup_key(team_a, team_b) == matchup_key(old_a, old_b)", source)
+        self.assertIn("if golf_constraints:", source)
+
 if __name__ == "__main__":
     unittest.main()
