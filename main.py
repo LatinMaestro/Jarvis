@@ -17533,11 +17533,18 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
         heap_i = 0
 
         for team_a, team_b in _iter_candidates():
-            if golf_constraints and not satisfies_golf_choices(
-                team_a, team_b, golf_constraints["champion"],
-                golf_constraints["teammate"], golf_constraints["opponent"]
-            ):
-                continue
+            if golf_constraints:
+                if not satisfies_golf_choices(
+                    team_a, team_b, golf_constraints["champion"],
+                    golf_constraints["teammate"], golf_constraints["opponent"]
+                ):
+                    continue
+                # A paid reshuffle must produce a genuinely different split;
+                # do not spend a credit returning the same pending teams.
+                old_pending = session.pending_roll_data or {}
+                old_a, old_b = old_pending.get("team_a"), old_pending.get("team_b")
+                if old_a and old_b and matchup_key(team_a, team_b) == matchup_key(old_a, old_b):
+                    continue
             if enforce_pair_lock and (_team_has_hard_locked_pair(team_a) or _team_has_hard_locked_pair(team_b)):
                 continue
 
