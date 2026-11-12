@@ -17697,7 +17697,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
     pair_lock_enforced = bool(hard_locked_pairs)
     best_heap, scored_candidates = _build_top_heap(enforce_pair_lock=pair_lock_enforced)
 
-    if not best_heap and pair_lock_enforced:
+    if not best_heap and pair_lock_enforced and not golf_constraints:
         session.pair_lock_47_disabled = True
         session.pair_lock_47_disabled_lobby = tuple(sorted(active))
         pair_lock_auto_disabled_this_roll = True
@@ -18402,6 +18402,11 @@ class GolfChampionSelectionView(discord.ui.View):
         session = self._session()
         if not session:
             return
+        if self.step == "confirm":
+            self.add_item(self.confirm)
+            self.add_item(self.cancel)
+            return
+        self.add_item(self.cancel)
         if self.step == "champion":
             players = _golf_eligible_for_session(self.key, session)
             options = [
@@ -18471,7 +18476,6 @@ class GolfChampionSelectionView(discord.ui.View):
 
     @discord.ui.button(label="Confirm Golf Reshuffle", style=discord.ButtonStyle.success, row=1)
     async def confirm(self, interaction, button):
-        # Discord buttons are visible only in the final step.
         if self.step != "confirm":
             await interaction.response.send_message("Complete all three selections first.", ephemeral=True)
             return
