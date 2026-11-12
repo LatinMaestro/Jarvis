@@ -16835,6 +16835,8 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
         pass
 
     session, fair_ctx = _get_or_create_session_by_key(key)
+    previous_last_split = session.last_split
+    previous_last_debug = session.last_debug
 
     # Commit pending roll (played) if requested
     if commit_pending:
@@ -17887,10 +17889,14 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
             ensure_golf_tables(conn)
             champion_uid = _uid_from_pkey(golf_constraints["champion"])
             if champion_uid is None or not claim_credit(conn, key[0], season_id_now, champion_uid):
+                session.last_split = previous_last_split
+                session.last_debug = previous_last_debug
                 await channel.send("Golf credit unavailable. Original teams remain pending.")
                 return False
             golf_claimed = True
         except Exception:
+            session.last_split = previous_last_split
+            session.last_debug = previous_last_debug
             await channel.send("Unable to charge golf credit. Original teams remain pending.")
             return False
         session.last_golf_champion = golf_constraints["champion"]
@@ -17909,6 +17915,8 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
         session.pending_roll_token = previous_token
         session.pending_roll_data = previous_data
         session.pending_roll_message_id = previous_message_id
+        session.last_split = previous_last_split
+        session.last_debug = previous_last_debug
         raise
     session.pending_roll_message_id = msg.id
     session.last_split = next_last_split
