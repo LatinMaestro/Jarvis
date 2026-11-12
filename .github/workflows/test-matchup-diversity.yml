@@ -7,6 +7,8 @@ on:
       - 'tests/test_matchup_history.py'
       - 'jarvis/stats/matchup_debug.py'
       - 'tests/test_matchup_debug.py'
+      - 'jarvis/stats/golf_reshuffle.py'
+      - 'tests/test_golf_reshuffle.py'
       - '.github/workflows/test-matchup-diversity.yml'
   workflow_dispatch:
 jobs:
@@ -20,10 +22,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Compile changed Python files
-        run: python -m py_compile main.py jarvis/stats/matchup_history.py tests/test_matchup_history.py jarvis/stats/matchup_debug.py tests/test_matchup_debug.py
+        run: python -m py_compile main.py jarvis/stats/matchup_history.py tests/test_matchup_history.py jarvis/stats/matchup_debug.py tests/test_matchup_debug.py jarvis/stats/golf_reshuffle.py tests/test_golf_reshuffle.py
       - name: Run matchup history tests
         run: python -m unittest discover -s tests -p 'test_matchup_history.py' -v
       - name: Run matchup diagnostics tests
         run: python -m unittest discover -s tests -p 'test_matchup_debug.py' -v
+      - name: Run golf reshuffle tests
+        run: python -m unittest discover -s tests -p 'test_golf_reshuffle.py' -v
       - name: Run existing fairness regressions
         run: python -m unittest discover -s tests -p 'test_team_fairness.py' -v
