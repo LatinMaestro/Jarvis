@@ -18560,6 +18560,18 @@ class NextTeamsControlsView(discord.ui.View):
         except Exception:
             return False
 
+    async def _reject_if_stale(self, interaction: discord.Interaction) -> bool:
+        """Prevent old team messages from committing or modifying a newer roll."""
+        session, _ = _get_or_create_session_by_key(self.key)
+        if (session.pending_roll_token == self.pending_token
+                and session.pending_roll_message_id == interaction.message.id):
+            return False
+        await interaction.response.send_message(
+            "These buttons are from an older team proposal. Please use the latest Next Teams message.",
+            ephemeral=True,
+        )
+        return True
+
     async def _reject_if_expired(self, interaction: discord.Interaction) -> bool:
         if not self._is_expired(interaction):
             return False
@@ -18620,6 +18632,8 @@ class NextTeamsControlsView(discord.ui.View):
     async def redo_change_lobby(self, interaction: discord.Interaction, button: discord.ui.Button):
         if await self._reject_if_expired(interaction):
             return
+        if await self._reject_if_stale(interaction):
+            return
 
         session, _ = _get_or_create_session_by_key(self.key)
         session.last_golf_champion = None
@@ -18655,6 +18669,8 @@ class NextTeamsControlsView(discord.ui.View):
     async def next_same_lobby(self, interaction: discord.Interaction, button: discord.ui.Button):
         if await self._reject_if_expired(interaction):
             return
+        if await self._reject_if_stale(interaction):
+            return
 
         session, _ = _get_or_create_session_by_key(self.key)
 
@@ -18689,6 +18705,8 @@ class NextTeamsControlsView(discord.ui.View):
     )
     async def next_change_lobby(self, interaction: discord.Interaction, button: discord.ui.Button):
         if await self._reject_if_expired(interaction):
+            return
+        if await self._reject_if_stale(interaction):
             return
 
         session, _ = _get_or_create_session_by_key(self.key)
@@ -19840,6 +19858,12 @@ async def helpme(ctx):
                  "Update active players for the current fairness session."),
                 ("!next_teams",
                  "Generate next teams using fairness-weighted randomisation."),
+                ("!golf_award <player> <credits>",
+                 "ADMIN: award seasonal golf reshuffle credits."),
+                ("!golf_remove <player> <credits>",
+                 "ADMIN: remove unspent golf reshuffle credits."),
+                ("!golf_balance",
+                 "Show all players' remaining golf credits."),
                 ("!teammate_role_bans",
                  "Show teammate role-ban exposure confirmed against uploaded games. Aliases: !role_ban_matrix, !teammate_ban_matrix."),
                 ("!fairness_debug",
