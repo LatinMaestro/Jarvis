@@ -16838,6 +16838,8 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
 
     # Commit pending roll (played) if requested
     if commit_pending:
+        session_before, _ = _get_or_create_session_by_key(key)
+        session_before.last_golf_champion = None
         try:
             if getattr(session, "pending_roll_token", None) and getattr(session, "pending_roll_data", None):
                 _commit_pending_roll(session, session.pending_roll_token, key=key)
@@ -17859,8 +17861,7 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
     ])
 
     token = uuid4().hex
-    session.pending_roll_token = token
-    session.pending_roll_data = {
+    next_pending_data = {
         "team_a": team_a,
         "team_b": team_b,
         "low_team": low_team,
@@ -17870,6 +17871,9 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
     }
 
     # Spend only after finding an eligible candidate; refund if message delivery fails.
+    previous_token = session.pending_roll_token
+    previous_data = session.pending_roll_data
+    previous_message_id = session.pending_roll_message_id
     golf_claimed = False
     if golf_constraints:
         try:
@@ -17883,6 +17887,8 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
             await channel.send("Unable to charge golf credit. Original teams remain pending.")
             return False
         session.last_golf_champion = golf_constraints["champion"]
+    session.pending_roll_token = token
+    session.pending_roll_data = next_pending_data
     view = NextTeamsControlsView(key, pending_token=token)
     try:
         msg = await channel.send("\n".join(lines), view=view)
@@ -17893,6 +17899,9 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
             except Exception:
                 pass
             session.last_golf_champion = golf_constraints.get("previous_champion")
+        session.pending_roll_token = previous_token
+        session.pending_roll_data = previous_data
+        session.pending_roll_message_id = previous_message_id
         raise
     session.pending_roll_message_id = msg.id
 
