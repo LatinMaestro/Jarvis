@@ -18645,7 +18645,6 @@ class NextTeamsControlsView(discord.ui.View):
             return
 
         session, _ = _get_or_create_session_by_key(self.key)
-        session.last_golf_champion = None
 
         # Discard pending without recording
         session.pending_roll_token = None
@@ -19570,7 +19569,9 @@ async def session_players(ctx):
     # Keep existing behaviour: if there is a pending roll, commit it before changing lobby.
     try:
         if getattr(session, "pending_roll_token", None) and getattr(session, "pending_roll_data", None):
-            _commit_pending_roll(session, session.pending_roll_token, key=key)
+            if _commit_pending_roll(session, session.pending_roll_token, key=key):
+                session.last_golf_champion = None
+                _save_session_state(key, session)
     except Exception:
         pass
 
