@@ -69,5 +69,29 @@ class GolfReshuffleTests(unittest.TestCase):
         self.assertEqual(credit_balances(self.db, 10, 8), {"u1": 2, "u2": 1})
 
 
+    def test_golf_reshuffle_rebuilds_role_bans_normally(self):
+        """Golf choices filter teams; the existing role-ban builder runs afresh."""
+        import ast
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parents[1] / "main.py").read_text()
+        tree = ast.parse(source)
+        roll = next(
+            node for node in tree.body
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_run_next_teams_roll"
+        )
+        role_builder_calls = [
+            node for node in ast.walk(roll)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_nt_build_restricted_roles_for_roll"
+        ]
+        self.assertEqual(len(role_builder_calls), 1)
+        self.assertTrue(
+            any(isinstance(n, ast.Name) and n.id == "satisfies_golf_choices"
+                for n in ast.walk(roll))
+        )
+        self.assertIn('"restricted_roles": dict(restricted_roles or {})', source)
+
 if __name__ == "__main__":
     unittest.main()
