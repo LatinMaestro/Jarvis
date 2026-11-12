@@ -114,6 +114,10 @@ from jarvis.stats.seasons import (
 from jarvis.stats.season_fairness_export import load_fairness_replay
 from jarvis.stats.matchup_history import imported_matchups, combined_matchup_counts, choose_diverse_candidate, matchup_key
 from jarvis.stats.matchup_debug import format_matchup_diversity_debug
+from jarvis.stats.golf_reshuffle import (
+    ensure_golf_tables, available_credits, credit_balances, eligible_champions,
+    valid_golf_choices, satisfies_golf_choices, adjust_credits, claim_credit, refund_credit,
+)
 from jarvis.stats.team_fairness import (
     candidate_pair_target_penalty as _nt_candidate_pair_target_penalty,
     candidate_role_ban_exposure_penalty as _nt_candidate_role_ban_exposure_penalty,
@@ -157,6 +161,8 @@ from rivalsmeta_adapter import (
 SESSION_STATES = {}  # key = (guild_id, channel_id) -> SessionState
 FAIRNESS_CONTEXTS = {}  # key = (guild_id, channel_id) -> FairnessContext
 _PERSISTENT_NEXTTEAMS_VIEWS_REGISTERED = False
+_GOLF_RESHUFFLE_LOCKS = {}
+
 
 # =========================
 # Discord bot setup
@@ -552,6 +558,7 @@ def _apply_session_state(session, data: dict):
         session.pending_roll_data = None
 
     # 47% pair-lock session state
+    session.last_golf_champion = data.get("last_golf_champion")
     session.pair_lock_47_disabled = bool(data.get("pair_lock_47_disabled", False))
     session.pair_lock_47_disabled_lobby = (
         tuple(sorted(data.get("pair_lock_47_disabled_lobby") or []))
@@ -16802,7 +16809,8 @@ def _nt_role_emoji(role: str) -> str:
 # ============================================================================================================
 # ============================================================================================================
 
-async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending: bool):
+async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending: bool,
+                               golf_constraints: dict | None = None):
     """
     Next-teams fairness roll.
 
@@ -16836,6 +16844,9 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
         except Exception:
             pass
 
+    if golf_constraints and commit_pending:
+        raise ValueError("Golf reshuffles may not commit the previous pending proposal.")
+
     # Active lobby must be set
     if not session.active_players:
         await channel.send("No active players set. Use `!session_start` or `!session_players` first.")
@@ -16848,6 +16859,12 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
         return
 
     active_set = set(active)
+    if golf_constraints and not valid_golf_choices(
+        active, golf_constraints.get("champion"), golf_constraints.get("teammate"),
+        golf_constraints.get("opponent")
+    ):
+        await channel.send("Golf reshuffle requires at least 8 active players and three distinct lobby members.")
+        return False
     # =====================================================================================
     # Role Restrictions — ALWAYS enforced (season DB + committed session overlay)
     # =====================================================================================
@@ -17514,6 +17531,11 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
         heap_i = 0
 
         for team_a, team_b in _iter_candidates():
+            if golf_constraints and not satisfies_golf_choices(
+                team_a, team_b, golf_constraints["champion"],
+                golf_constraints["teammate"], golf_constraints["opponent"]
+            ):
+                continue
             if enforce_pair_lock and (_team_has_hard_locked_pair(team_a) or _team_has_hard_locked_pair(team_b)):
                 continue
 
@@ -17685,8 +17707,11 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
             pass
 
     if not best_heap:
-        await channel.send("Unable to generate a team split. Try again.")
-        return
+        await channel.send(
+            "No eligible team combination satisfies the golf selections and current hard restrictions."
+            if golf_constraints else "Unable to generate a team split. Try again."
+        )
+        return False
 
     # Convert heap to sorted ascending by total_score
     top = sorted([(-neg, i, meta) for (neg, i, meta) in best_heap], key=lambda x: x[0])
@@ -17844,14 +17869,38 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
         "generated_at_epoch": time.time(),
     }
 
-    view = NextTeamsControlsView(key)
-    msg = await channel.send("\n".join(lines), view=view)
+    # Spend only after finding an eligible candidate; refund if message delivery fails.
+    golf_claimed = False
+    if golf_constraints:
+        try:
+            ensure_golf_tables(conn)
+            champion_uid = _uid_from_pkey(golf_constraints["champion"])
+            if champion_uid is None or not claim_credit(conn, key[0], season_id_now, champion_uid):
+                await channel.send("Golf credit unavailable. Original teams remain pending.")
+                return False
+            golf_claimed = True
+        except Exception:
+            await channel.send("Unable to charge golf credit. Original teams remain pending.")
+            return False
+        session.last_golf_champion = golf_constraints["champion"]
+    view = NextTeamsControlsView(key, pending_token=token)
+    try:
+        msg = await channel.send("\n".join(lines), view=view)
+    except Exception:
+        if golf_claimed:
+            try:
+                refund_credit(conn, key[0], season_id_now, champion_uid)
+            except Exception:
+                pass
+            session.last_golf_champion = golf_constraints.get("previous_champion")
+        raise
     session.pending_roll_message_id = msg.id
 
     try:
         _save_session_state(key, session)
     except Exception:
         pass
+    return True
 
 # -------------------------
 # API identity helpers
@@ -17961,6 +18010,7 @@ class SessionState:
 
     # 47% pair-lock session state
     pair_lock_47_disabled: bool = False
+    last_golf_champion: str | None = None
     pair_lock_47_disabled_lobby: tuple[str, ...] | None = None
 
 def _build_fairness_context() -> FairnessContext:
@@ -18214,10 +18264,15 @@ class NextTeamsControlsView(discord.ui.View):
 
     MAX_AGE_SECONDS = 3600  # 1 hour
 
-    def __init__(self, key: tuple[int, int]):
+    def __init__(self, key: tuple[int, int], pending_token: str | None = None):
         # timeout=None makes this a persistent view that can survive bot restarts
         super().__init__(timeout=None)
         self.key = key
+        session = SESSION_STATES.get(key)
+        if session is None:
+            session, _ = _get_or_create_session_by_key(key)
+        self.pending_token = pending_token or getattr(session, "pending_roll_token", None)
+        self.golf_champion_reshuffle.disabled = not bool(_golf_eligible_for_session(key, session))
 
     def _get_session(self):
         return SESSION_STATES.get(self.key)
@@ -18271,6 +18326,7 @@ class NextTeamsControlsView(discord.ui.View):
             return
 
         session, _ = _get_or_create_session_by_key(self.key)
+        session.last_golf_champion = None
 
         # Discard pending without recording
         session.pending_roll_token = None
@@ -18310,6 +18366,10 @@ class NextTeamsControlsView(discord.ui.View):
             await interaction.response.send_message("No pending teams to record. Run `!next_teams` first.", ephemeral=True)
             return
 
+        # A new normal game cycle resets consecutive champion exclusion.
+        session.last_golf_champion = None
+        # A new normal game cycle resets consecutive champion exclusion.
+        session.last_golf_champion = None
         # Commit pending roll as played
         try:
             _commit_pending_roll(session, session.pending_roll_token, key=self.key)
@@ -18637,6 +18697,7 @@ def _serialize_session(session: SessionState) -> dict:
 
         # pair-lock session state
         "pair_lock_47_disabled": bool(getattr(session, "pair_lock_47_disabled", False)),
+        "last_golf_champion": getattr(session, "last_golf_champion", None),
         "pair_lock_47_disabled_lobby": (
             sorted(list(getattr(session, "pair_lock_47_disabled_lobby", []) or []))
             if getattr(session, "pair_lock_47_disabled_lobby", None)
