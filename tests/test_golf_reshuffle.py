@@ -99,5 +99,13 @@ class GolfReshuffleTests(unittest.TestCase):
         self.assertIn("matchup_key(team_a, team_b) == matchup_key(old_a, old_b)", source)
         self.assertIn("if golf_constraints:", source)
 
+    def test_golf_constraints_do_not_auto_disable_hard_pair_lock(self):
+        from pathlib import Path
+        source = (Path(__file__).resolve().parents[1] / "main.py").read_text()
+        self.assertIn(
+            "if not best_heap and pair_lock_enforced and not golf_constraints:",
+            source,
+        )
+
 if __name__ == "__main__":
     unittest.main()
