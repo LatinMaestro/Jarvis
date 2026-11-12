@@ -18263,6 +18263,263 @@ class ActivePlayersView(discord.ui.View):
 
 
 
+# =====================================================================================
+# Golf champion reshuffle: season ledger and open-to-everyone interaction
+# =====================================================================================
+
+def _golf_eligible_for_session(key, session):
+    try:
+        ensure_golf_tables(conn)
+        return eligible_champions(
+            credit_balances(conn, key[0], get_current_season_id()),
+            session.active_players, session.last_golf_champion,
+        )
+    except Exception:
+        return {}
+
+
+def _golf_champion_name(session, player_key):
+    return session.display_name_map.get(player_key, player_key)
+
+
+def _golf_player_key(raw):
+    """Accept stable numeric player UID or a full roster display name."""
+    value = str(raw or "").strip().strip('"')
+    roster = _get_all_players_prefer_roster()
+    if value.isdigit() and f"u{int(value)}" in roster:
+        return f"u{int(value)}"
+    if value.startswith("u") and value[1:].isdigit() and value in roster:
+        return value
+    matches = [key for key, name in roster.items() if name.casefold() == value.casefold()]
+    if len(matches) != 1:
+        raise ValueError("Player must match exactly one roster name or numeric player UID.")
+    return matches[0]
+
+
+async def _golf_refresh_buttons(guild_id):
+    """Refresh disabled/enabled state on pending messages after credit admin changes."""
+    for key, message_id in _iter_saved_pending_nextteams_views():
+        if key[0] != guild_id:
+            continue
+        try:
+            channel = bot.get_channel(key[1])
+            if channel is None:
+                channel = await bot.fetch_channel(key[1])
+            session, _ = _get_or_create_session_by_key(key)
+            message = await channel.fetch_message(message_id)
+            await message.edit(view=NextTeamsControlsView(key))
+        except Exception:
+            pass
+
+
+@bot.command(name="golf_award")
+async def golf_award(ctx, *, specification: str = ""):
+    """!golf_award Player Name 2  |  !golf_award 123456 2"""
+    if not ctx.guild or not ctx.author.guild_permissions.administrator:
+        await ctx.send("Only Discord administrators can award golf credits.")
+        return
+    try:
+        name, count = specification.rsplit(maxsplit=1)
+        amount = int(count)
+        if not 1 <= amount <= 100:
+            raise ValueError("Award must be 1 to 100 credits.")
+        player = _golf_player_key(name)
+        balance = adjust_credits(conn, ctx.guild.id, get_current_season_id(),
+                                 _uid_from_pkey(player), amount)
+    except (ValueError, TypeError) as error:
+        await ctx.send(f"Usage: `!golf_award <player name or UID> <credits>`. {error}")
+        return
+    await ctx.send(f"🏆 {_golf_champion_name_from_roster(player)}: +{amount} golf credit(s). Remaining: **{balance}**.")
+    await _golf_refresh_buttons(ctx.guild.id)
+
+
+@bot.command(name="golf_remove")
+async def golf_remove(ctx, *, specification: str = ""):
+    """Remove unspent golf credits, admin only."""
+    if not ctx.guild or not ctx.author.guild_permissions.administrator:
+        await ctx.send("Only Discord administrators can remove golf credits.")
+        return
+    try:
+        name, count = specification.rsplit(maxsplit=1)
+        amount = int(count)
+        if not 1 <= amount <= 100:
+            raise ValueError("Removal must be 1 to 100 credits.")
+        player = _golf_player_key(name)
+        balance = adjust_credits(conn, ctx.guild.id, get_current_season_id(),
+                                 _uid_from_pkey(player), -amount)
+    except (ValueError, TypeError) as error:
+        await ctx.send(f"Usage: `!golf_remove <player name or UID> <credits>`. {error}")
+        return
+    await ctx.send(f"🏆 {_golf_champion_name_from_roster(player)}: -{amount} golf credit(s). Remaining: **{balance}**.")
+    await _golf_refresh_buttons(ctx.guild.id)
+
+
+def _golf_champion_name_from_roster(player):
+    return _get_all_players_prefer_roster().get(player, player)
+
+
+@bot.command(name="golf_balance")
+async def golf_balance(ctx):
+    if not ctx.guild:
+        await ctx.send("Golf credits are only available in Discord servers.")
+        return
+    ensure_golf_tables(conn)
+    balances = credit_balances(conn, ctx.guild.id, get_current_season_id())
+    if not balances:
+        await ctx.send("🏆 No golf reshuffle credits have been awarded this season.")
+        return
+    names = _get_all_players_prefer_roster()
+    lines = [
+        f"- {names.get(player, player)}: **{amount}** remaining"
+        for player, amount in sorted(balances.items(), key=lambda item: names.get(item[0], item[0]).lower())
+    ]
+    await ctx.send(f"🏆 Golf credits — Season {get_current_season_id()}\n" + "\n".join(lines))
+
+
+class GolfChampionSelectionView(discord.ui.View):
+    """Ephemeral 3-select wizard. Anyone can operate it for a credited champion."""
+
+    def __init__(self, key, pending_token, pending_message_id):
+        super().__init__(timeout=300)
+        self.key = key
+        self.pending_token = pending_token
+        self.pending_message_id = pending_message_id
+        self.champion = None
+        self.teammate = None
+        self.opponent = None
+        self.step = "champion"
+        self._render_step()
+
+    def _session(self):
+        session, _ = _get_or_create_session_by_key(self.key)
+        if (session.pending_roll_token != self.pending_token
+                or session.pending_roll_message_id != self.pending_message_id):
+            return None
+        return session
+
+    def _render_step(self):
+        self.clear_items()
+        session = self._session()
+        if not session:
+            return
+        if self.step == "champion":
+            players = _golf_eligible_for_session(self.key, session)
+            options = [
+                discord.SelectOption(
+                    label=_golf_champion_name(session, player)[:100],
+                    value=player,
+                    description=f"{credits} credit(s) remaining"
+                ) for player, credits in players.items()
+            ]
+            prompt = "Select golf champion"
+        else:
+            excluded = {self.champion}
+            if self.step == "opponent":
+                excluded.add(self.teammate)
+            options = [
+                discord.SelectOption(label=_golf_champion_name(session, player)[:100], value=player)
+                for player in sorted(session.active_players)
+                if player not in excluded
+            ]
+            prompt = ("Choose required teammate" if self.step == "teammate"
+                      else "Choose required opponent")
+        if not options:
+            return
+        select = discord.ui.Select(placeholder=prompt, min_values=1, max_values=1,
+                                   options=options[:25])
+        async def selected(interaction):
+            current = self._session()
+            if not current:
+                await interaction.response.send_message(
+                    "This teams proposal is no longer pending. Start again from the latest teams.", ephemeral=True)
+                return
+            value = select.values[0]
+            if self.step == "champion":
+                if value not in _golf_eligible_for_session(self.key, current):
+                    await interaction.response.send_message("Champion is no longer eligible.", ephemeral=True)
+                    return
+                self.champion = value
+                self.step = "teammate"
+            elif self.step == "teammate":
+                if value not in current.active_players or value == self.champion:
+                    await interaction.response.send_message("Invalid teammate.", ephemeral=True)
+                    return
+                self.teammate = value
+                self.step = "opponent"
+            else:
+                if not valid_golf_choices(current.active_players, self.champion, self.teammate, value):
+                    await interaction.response.send_message("Invalid opposing player.", ephemeral=True)
+                    return
+                self.opponent = value
+                self.step = "confirm"
+            self._render_step()
+            await interaction.response.edit_message(content=self._summary(current), view=self)
+        select.callback = selected
+        self.add_item(select)
+        return
+
+    def _summary(self, session):
+        lines = ["🏆⛳ **Golf Champion Reshuffle**"]
+        if self.champion:
+            lines.append(f"Champion: **{_golf_champion_name(session, self.champion)}**")
+        if self.teammate:
+            lines.append(f"Required teammate: **{_golf_champion_name(session, self.teammate)}**")
+        if self.opponent:
+            lines.append(f"Required opponent: **{_golf_champion_name(session, self.opponent)}**")
+        lines.append("Select a player below, or confirm when all three are chosen. No credit is charged until successful generation.")
+        return "\n".join(lines)
+
+    @discord.ui.button(label="Confirm Golf Reshuffle", style=discord.ButtonStyle.success, row=1)
+    async def confirm(self, interaction, button):
+        # Discord buttons are visible only in the final step.
+        if self.step != "confirm":
+            await interaction.response.send_message("Complete all three selections first.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        lock = _GOLF_RESHUFFLE_LOCKS.setdefault(self.key, asyncio.Lock())
+        async with lock:
+            session = self._session()
+            if not session or self.champion not in _golf_eligible_for_session(self.key, session):
+                await interaction.followup.send("Reshuffle is no longer available on these teams.", ephemeral=True)
+                return
+            if not valid_golf_choices(session.active_players, self.champion, self.teammate, self.opponent):
+                await interaction.followup.send("Invalid player selections.", ephemeral=True)
+                return
+            try:
+                success = await _run_next_teams_roll(
+                    interaction.channel, self.key, commit_pending=False,
+                    golf_constraints={
+                        "champion": self.champion, "teammate": self.teammate,
+                        "opponent": self.opponent,
+                        "previous_champion": session.last_golf_champion,
+                    }
+                )
+            except Exception:
+                await interaction.followup.send(
+                    "Reshuffle could not be completed. Check the channel before retrying.", ephemeral=True)
+                return
+            if not success:
+                await interaction.followup.send(
+                    "No valid reshuffle was completed. No golf credit was spent.", ephemeral=True)
+                return
+            # Old proposal is discarded, NOT recorded as played.
+            try:
+                old_message = await interaction.channel.fetch_message(self.pending_message_id)
+                await old_message.edit(
+                    content=(old_message.content or "") + "\n\n🏌️ Golf reshuffle — replaced, not played.",
+                    view=None,
+                )
+            except Exception:
+                pass
+            self.stop()
+            await interaction.followup.send("🏆 Golf reshuffle completed. One credit used.", ephemeral=True)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=1)
+    async def cancel(self, interaction, button):
+        self.stop()
+        await interaction.response.edit_message(content="Golf reshuffle cancelled. No credit spent.", view=None)
+
+
 class NextTeamsControlsView(discord.ui.View):
     """
     Season 5 workflow buttons:
@@ -18324,6 +18581,32 @@ class NextTeamsControlsView(discord.ui.View):
             pass
 
         return True
+
+    @discord.ui.button(
+        label="🏆⛳ Golf Champion Reshuffle",
+        style=discord.ButtonStyle.secondary,
+        custom_id="nextteams:golf_reshuffle",
+        row=2,
+    )
+    async def golf_champion_reshuffle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self._reject_if_expired(interaction):
+            return
+        session, _ = _get_or_create_session_by_key(self.key)
+        if (session.pending_roll_token != self.pending_token
+                or session.pending_roll_message_id != interaction.message.id):
+            await interaction.response.send_message(
+                "These buttons are from an old team proposal. Use the latest teams.", ephemeral=True)
+            return
+        eligible = _golf_eligible_for_session(self.key, session)
+        if not eligible:
+            await interaction.response.send_message(
+                "Golf reshuffle unavailable: minimum 8 players and an eligible champion with credits required.",
+                ephemeral=True,
+            )
+            return
+        wizard = GolfChampionSelectionView(self.key, self.pending_token, interaction.message.id)
+        # The user choosing these options does not need to be the champion.
+        await interaction.response.send_message(wizard._summary(session), view=wizard, ephemeral=True)
 
     @discord.ui.button(
         label="Redo - Change Lobby",
