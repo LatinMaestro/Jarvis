@@ -17822,13 +17822,13 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
             for a, b in sorted(hard_locked_pairs)
         ]
 
-    session.last_split = {
+    next_last_split = {
         "team_a": team_a,
         "team_b": team_b,
         "low_team": low_team,
         "score": float(base_score),
     }
-    session.last_debug = debug_info
+    next_last_debug = debug_info
 
     def disp(pkey: str) -> str:
         return session.display_name_map.get(pkey, pkey)
@@ -17904,6 +17904,8 @@ async def _run_next_teams_roll(channel, key: tuple[int, int], *, commit_pending:
         session.pending_roll_message_id = previous_message_id
         raise
     session.pending_roll_message_id = msg.id
+    session.last_split = next_last_split
+    session.last_debug = next_last_debug
 
     try:
         _save_session_state(key, session)
