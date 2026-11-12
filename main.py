@@ -18662,9 +18662,7 @@ class NextTeamsControlsView(discord.ui.View):
             await interaction.response.send_message("No pending teams to record. Run `!next_teams` first.", ephemeral=True)
             return
 
-        # A new normal game cycle resets consecutive champion exclusion.
-        session.last_golf_champion = None
-        # A new normal game cycle resets consecutive champion exclusion.
+        # A normal game cycle resets consecutive champion exclusion.
         session.last_golf_champion = None
         # Commit pending roll as played
         try:
@@ -18699,6 +18697,8 @@ class NextTeamsControlsView(discord.ui.View):
             await interaction.response.send_message("No pending teams to record. Run `!next_teams` first.", ephemeral=True)
             return
 
+        # A normal game cycle resets consecutive champion exclusion.
+        session.last_golf_champion = None
         # Commit pending roll as played
         try:
             _commit_pending_roll(session, session.pending_roll_token, key=self.key)
