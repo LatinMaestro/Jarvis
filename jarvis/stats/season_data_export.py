@@ -11,6 +11,7 @@ import json
 import zipfile
 
 from jarvis.stats.season_leaderboard_timeline import build_season_leaderboard_timeline
+from jarvis.stats.season_fairness_export import load_fairness_replay
 from jarvis.stats.sessions import load_all_ordered_game_labels
 
 
@@ -121,6 +122,8 @@ def build_season_data_export(cursor, season_id, utc_offset_hours=10):
             len(game["players"]),
         ))
 
+    fairness_replay = load_fairness_replay(cursor, season_id)
+
     manifest = {
         "type": "marvel_rivals_season_database_export",
         "schema_version": 1,
@@ -135,6 +138,7 @@ def build_season_data_export(cursor, season_id, utc_offset_hours=10):
             "leaderboard_timeline.json": "Complete match results and ranked standings after every game",
             "leaderboard_history.csv": "One row per season player per game, including unranked players",
             "games.csv": "Chronological match order, timestamps and recorded winning camp",
+            "fairness_replay.json": "Recorded team assignments, roles and available confirmed role-ban history",
             "tables/*.csv": "All stored records in the listed season-scoped source tables, including raw API match JSON text",
         },
         "source_table_row_counts": {
@@ -149,6 +153,7 @@ def build_season_data_export(cursor, season_id, utc_offset_hours=10):
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
         archive.writestr("manifest.json", json.dumps(manifest, indent=2, ensure_ascii=False))
         archive.writestr("leaderboard_timeline.json", json.dumps(timeline, indent=2, ensure_ascii=False))
+        archive.writestr("fairness_replay.json", json.dumps(fairness_replay, indent=2, ensure_ascii=False))
         archive.writestr(
             "leaderboard_history.csv",
             _csv_bytes(
