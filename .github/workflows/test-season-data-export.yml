@@ -1,0 +1,33 @@
+name: Season Data Export Tests
+
+on:
+  pull_request:
+    paths:
+      - 'main.py'
+      - 'jarvis/stats/season_data_export.py'
+      - 'jarvis/stats/season_leaderboard_timeline.py'
+      - 'jarvis/stats/season_fairness_export.py'
+      - 'jarvis/stats/sessions.py'
+      - 'tests/test_season_data_export.py'
+      - 'tests/test_season_leaderboard_timeline.py'
+      - '.github/workflows/test-season-data-export.yml'
+  workflow_dispatch:
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Compile changed files
+        run: python -m py_compile main.py jarvis/stats/season_data_export.py jarvis/stats/season_leaderboard_timeline.py tests/test_season_data_export.py tests/test_season_leaderboard_timeline.py
+      - name: Test factual ZIP database export
+        run: python -m unittest discover -s tests -p 'test_season_data_export.py' -v
+      - name: Test precise match-by-match leaderboard
+        run: python -m unittest discover -s tests -p 'test_season_leaderboard_timeline.py' -v
+      - name: Test public command compatibility
+        run: python -m unittest discover -s tests -p 'test_main_characterization.py' -v
