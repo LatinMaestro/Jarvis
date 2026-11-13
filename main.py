@@ -112,6 +112,7 @@ from jarvis.stats.seasons import (
     season_game_count as _read_season_game_count,
 )
 from jarvis.stats.season_fairness_export import load_fairness_replay
+from jarvis.stats.season_leaderboard_timeline import build_season_leaderboard_timeline
 from jarvis.stats.matchup_history import imported_matchups, combined_matchup_counts, choose_diverse_candidate, matchup_key
 from jarvis.stats.matchup_debug import format_matchup_diversity_debug
 from jarvis.stats.golf_reshuffle import (
@@ -13584,7 +13585,9 @@ def _smp_build_cast_from_df(season_id: int, season_df) -> list[dict]:
             "player_uid": uid,
             "player_name": pname,
             "main_hero_id": hid,          # name attached later
-            "games": _smp_norm_int(r.get("games") or r.get("g") or 0),
+            "games": _smp_norm_int(r.get("games") or r.get("g") or (
+                _smp_norm_int(r.get("wins")) + _smp_norm_int(r.get("losses"))
+            )),
             "wins": _smp_norm_int(r.get("wins") or r.get("w") or 0),
             "winrate": _smp_norm_float(r.get("winrate") or 0.0, 2, 0.0),
         })
@@ -14050,6 +14053,15 @@ async def _smp_build_movie_pack_md(season_id: int) -> io.BytesIO | None:
 
     # --- Labels / Sessions ---
     all_labels = _smp_safe_call("_all_ordered_game_labels_api", season_id, default=[])
+    # Exact cumulative standings after every game, based on recorded results.
+    # Fail rather than export invented/interpolated positions if any game is missing.
+    leaderboard_timeline = build_season_leaderboard_timeline(c, season_id, all_labels)
+    expected_games = _smp_norm_int(core_norm.get("total_games"), leaderboard_timeline["game_count"])
+    if leaderboard_timeline["game_count"] != expected_games:
+        raise ValueError(
+            f"Core records contain {expected_games} games but the complete leaderboard "
+            f"contains {leaderboard_timeline['game_count']}"
+        )
     ordered_dates, by_date = _smp_safe_call("_get_games_grouped_by_date_api", season_id, default=([], {}))
     ordered_dates = ordered_dates or []
     by_date = by_date or {}
@@ -14059,6 +14071,16 @@ async def _smp_build_movie_pack_md(season_id: int) -> io.BytesIO | None:
     if all_labels:
         season_df = _smp_safe_call("_aggregate_session_records_api", season_id, all_labels, default=None)
     cast = _smp_build_cast_from_df(season_id, season_df)
+    final_standings = {
+        r["player_uid"]: r
+        for r in leaderboard_timeline["games"][-1]["standings_after"]
+    }
+    if len(cast) != leaderboard_timeline["player_count"]:
+        raise ValueError("Cast size differs from the full match-results roster")
+    for player in cast:
+        latest = final_standings.get(player["player_uid"])
+        if latest is None or (player["games"], player["wins"]) != (latest["games"], latest["wins"]):
+            raise ValueError(f"Final standings do not reconcile for {player['player_name']}")
 
     # --- Hero names (collect IDs first) ---
     hero_ids: set[int] = set()
@@ -14141,6 +14163,7 @@ async def _smp_build_movie_pack_md(season_id: int) -> io.BytesIO | None:
 
         "core": core_norm,
         "hero_names": hero_names,
+        "leaderboard_timeline": leaderboard_timeline,  # Every game, result and all player ranks
 
         "season_lists": {
             "most_versatile": versatile or [],
@@ -14190,6 +14213,7 @@ async def _smp_build_movie_pack_md(season_id: int) -> io.BytesIO | None:
     lines.append("- JSON.arcs: character momentum (late surge, slump, struggle).")
     lines.append("- JSON.core.biggest_upset: major plot twist (do not narrate it as a stat).")
     lines.append("- JSON.fairness_replay: diagnostic appendix for offline team-fairness analysis; do not narrate every game.")
+    lines.append("- JSON.leaderboard_timeline: complete actual match-by-match results and cumulative ranks; use for a factual animated leaderboard, not fictional storytelling.")
     lines.append("")
     lines.append("Structure:")
     lines.append("1) Title + tagline")
@@ -14202,6 +14226,13 @@ async def _smp_build_movie_pack_md(season_id: int) -> io.BytesIO | None:
     lines.append("Tone:")
     lines.append("- Marvel-esque: cinematic stakes, witty banter, escalating set-pieces, teamwork and betrayals.")
     lines.append("- 1,200–2,500 words. Readable, entertaining, not a report.")
+    lines.append("")
+    lines.append("## Optional: animated leaderboard video")
+    lines.append("To recreate a race/bump-chart animation, use JSON.leaderboard_timeline.games in sequence order.")
+    lines.append("For every game, animate each player from the previous standings_after rank to the new rank.")
+    lines.append("An unplayed player has rank=null until their first match. Do not interpolate missing matches or invent results.")
+    lines.append("Use standings_after.winrate and rank for labels, and recorded_at_utc/time_source to identify timestamp fallbacks.")
+    lines.append("The non-numeric storytelling rules above DO NOT apply to an animated statistical leaderboard.")
     lines.append("")
     lines.append("## Data (JSON)")
     lines.append("```json")
@@ -14237,7 +14268,11 @@ async def season_movie_pack(ctx, season_id: int = None):
     # Confirm generated role-ban rolls against uploaded games before exporting.
     _nt_reconcile_role_ban_history(sid)
 
-    buf = await _smp_build_movie_pack_md(sid)
+    try:
+        buf = await _smp_build_movie_pack_md(sid)
+    except (ValueError, sqlite3.Error) as exc:
+        await ctx.send(f"Season movie pack could not export accurate match-by-match rankings: {str(exc)[:350]}")
+        return
     if buf is None:
         await ctx.send("No season data found yet. Import matches first, then try again.")
         return
