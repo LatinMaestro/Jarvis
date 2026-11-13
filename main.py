@@ -19042,7 +19042,7 @@ async def helpme(ctx):
                 ("!season_story",
                  "Season recap card with top performers, duos, hero meta, bans and upset highlights."),
                 ("!season_movie_pack [season_id]",
-                 "Download a JSON/Markdown pack for generating a cinematic season story."),
+                 "Download factual season match data, raw records and every-game leaderboard positions (ZIP)."),
                 ("!profile [player]",
                  "Single-player season dashboard image."),
                 ("!pregame",
