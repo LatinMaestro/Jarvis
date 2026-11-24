@@ -1,3 +1,4 @@
+import inspect
 import sqlite3
 import unittest
 from PIL import Image
@@ -96,6 +97,21 @@ class EarlyExitTests(unittest.TestCase):
         }
         large_image = Image.open(render_summary(enlarged, "Season 11 Early Exit Report"))
         self.assertGreater(large_image.size[1], image.size[1] + 2000)
+
+    def test_report_omits_marked_display_items(self):
+        renderer = inspect.getsource(render_summary)
+        self.assertIn('"EARLY EXITS"', renderer)
+        self.assertIn('"WINS"', renderer)
+        self.assertIn('"LOSSES"', renderer)
+        self.assertNotIn('"UNKNOWN"', renderer)
+        self.assertNotIn('"W/L RATE"', renderer)
+        self.assertNotIn('"TEAMMATE IMPACTS"', renderer)
+        self.assertNotIn('"UNIQUE AFFECTED"', renderer)
+        self.assertNotIn('"RESULTS AFTER AN EARLY EXIT"', renderer)
+        self.assertNotIn('appearances, not blame', renderer)
+        self.assertNotIn('"Unknown"', renderer)
+        # Backend still keeps unknown results for accurate accounting.
+        self.assertIn('"unknown"', summarize(self.db, 99)["total"])
 
     def test_image_is_valid_png(self):
         buf=render_summary(summarize(self.db,99),"Season 11 Early Exit Report")
