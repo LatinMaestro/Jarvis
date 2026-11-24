@@ -19311,17 +19311,9 @@ async def _ee_post_stats(channel, guild_id, season_id=None, *, title=None):
     data = _ee_summarize(conn, guild_id, season_id)
     report_title = title or (f"Season {season_id} Early Exit Report" if season_id is not None else "All-Time Early Exit Report")
     picture = _ee_render_summary(data, report_title)
+    # Image contains the full report, including both tables.
+    # Keep early_exit_list as the text-only raw history command.
     await channel.send(file=discord.File(fp=picture, filename="early_exit_report.png"))
-    message = _ee_format_summary(data,report_title)
-    # Discord's 2000-character cap; split at boundaries for long rosters.
-    segment = ""
-    for line in message.splitlines():
-        if len(segment)+len(line)+1>1850:
-            await channel.send(segment)
-            segment=""
-        segment += line+"\n"
-    if segment:
-        await channel.send(segment)
 
 async def _ee_refresh_channel(guild):
     """Refresh only early exits; never clear or recompute other statistics."""

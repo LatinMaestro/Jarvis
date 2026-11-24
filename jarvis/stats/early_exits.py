@@ -160,50 +160,160 @@ def format_summary(data, title):
 
 
 def render_summary(data, title):
-    """PIL-only scoreboard graphic; does not require optional chart packages."""
-    width, height = 1050, 700
-    img = Image.new("RGB",(width,height),(17,26,40))
-    draw = ImageDraw.Draw(img)
+    """Render a complete Discord-ready report with two readable tables."""
+    width, margin, row_height = 1200, 42, 57
+    player_rows = sorted(
+        data["by_player"].items(), key=lambda item: (-item[1]["exits"], item[0])
+    )
+    impact_rows = sorted(
+        data["affected"].items(), key=lambda item: (-item[1]["games"], item[0])
+    )
+    # Show every row (instead of hiding remaining people in an image-only report).
+    shown_players = player_rows or [(None, None)]
+    shown_impacts = impact_rows or [(None, None)]
+    top_height = 340
+    section_heading = 69
+    table_header = 60
+    table_gap = 43
+    footer_height = 96
+    height = (
+        top_height
+        + section_heading + table_header + len(shown_players) * row_height
+        + table_gap
+        + section_heading + table_header + len(shown_impacts) * row_height
+        + footer_height
+    )
+    image = Image.new("RGB", (width, height), (15, 22, 39))
+    draw = ImageDraw.Draw(image)
     try:
-        heading = ImageFont.truetype("DejaVuSans-Bold.ttf",36)
-        medium = ImageFont.truetype("DejaVuSans-Bold.ttf",24)
-        normal = ImageFont.truetype("DejaVuSans.ttf",21)
+        fonts = {
+            "title": ImageFont.truetype("DejaVuSans-Bold.ttf", 40),
+            "section": ImageFont.truetype("DejaVuSans-Bold.ttf", 29),
+            "metric": ImageFont.truetype("DejaVuSans-Bold.ttf", 42),
+            "normal": ImageFont.truetype("DejaVuSans.ttf", 23),
+            "bold": ImageFont.truetype("DejaVuSans-Bold.ttf", 24),
+            "small": ImageFont.truetype("DejaVuSans.ttf", 20),
+        }
     except OSError:
-        heading = medium = normal = ImageFont.load_default()
-    fg=(242,246,252); subdued=(176,194,216)
-    draw.text((42,32),title,fill=fg,font=heading)
-    t=data["total"]
-    for i,(label,value) in enumerate([("EARLY EXITS",t["exits"]),("WINS",t["wins"]),("LOSSES",t["losses"])]):
-        x=42+i*340
-        draw.rounded_rectangle((x,100,x+318,195),radius=14,fill=(34,49,72))
-        draw.text((x+19,112),label,font=normal,fill=subdued)
-        draw.text((x+19,142),str(value),font=heading,fill=fg)
-    known=t["wins"]+t["losses"]
-    draw.text((42,230),f"Results after early exit  |  Win rate: {t['wins']/known*100:.1f}%" if known else "Results after early exit  |  Win rate: N/A",font=medium,fill=fg)
-    draw.rounded_rectangle((42,272,1008,304),radius=10,fill=(89,102,124))
+        fonts = {key: ImageFont.load_default() for key in
+                 ("title", "section", "metric", "normal", "bold", "small")}
+
+    fg = (242, 245, 251)
+    muted = (175, 188, 210)
+    purple = (179, 143, 255)
+    green = (99, 231, 158)
+    red = (255, 126, 133)
+    blue = (126, 191, 250)
+
+    def text(value, xy, *, font="normal", fill=fg):
+        draw.text(xy, str(value), font=fonts[font], fill=fill)
+
+    def fitted(value, max_width, font="normal"):
+        """Prevent usernames longer than their table cell from overlapping values."""
+        value = str(value)
+        if draw.textbbox((0, 0), value, font=fonts[font])[2] <= max_width:
+            return value
+        while value and draw.textbbox((0, 0), value + "...",
+                                     font=fonts[font])[2] > max_width:
+            value = value[:-1]
+        return value + "..."
+
+    def section(y, label):
+        draw.rounded_rectangle(
+            (margin, y, width - margin, y + 53),
+            radius=11, fill=(37, 43, 73), outline=(100, 86, 159), width=2
+        )
+        draw.rounded_rectangle((margin, y, margin + 8, y + 53),
+                               radius=4, fill=purple)
+        text(label, (margin + 24, y + 9), font="section")
+        return y + section_heading
+
+    columns = [margin, 492, 674, 837, 1000, width - margin]
+    def table(y, headings, rows, first_key):
+        draw.rounded_rectangle((margin, y, width - margin, y + table_header),
+                               radius=9, fill=(44, 49, 77))
+        for i, label in enumerate(headings):
+            x = columns[i] + 16 if i == 0 else columns[i] + 12
+            text(label, (x, y + 16), font="bold",
+                 fill=purple if i == 0 else fg)
+        y += table_header
+        for index, (uid, details) in enumerate(rows):
+            draw.rectangle(
+                (margin, y, width - margin, y + row_height),
+                fill=(24, 32, 53) if index % 2 == 0 else (33, 39, 62)
+            )
+            if uid is None:
+                text("No records yet", (margin + 17, y + 14), fill=muted)
+            else:
+                name = data["names"].get(uid, str(uid))
+                values = [
+                    fitted(name, columns[1] - columns[0] - 30, "bold"),
+                    details[first_key], details["wins"],
+                    details["losses"], details["unknown"]
+                ]
+                for col, value in enumerate(values):
+                    fill = (green if col == 2 else red if col == 3 else fg)
+                    text(value, (columns[col] + 16, y + 13),
+                         font="bold", fill=fill)
+            y += row_height
+            draw.line((margin, y, width - margin, y), fill=(65, 71, 102), width=1)
+        return y
+
+    text(title, (margin, 30), font="title")
+    text("EARLY EXIT STATISTICS  /  MATCH RESULTS & TEAMMATE EXPOSURE",
+         (margin, 88), font="small", fill=muted)
+    t = data["total"]
+    known = t["wins"] + t["losses"]
+    win_rate = f"{t['wins'] / known * 100:.1f}%" if known else "N/A"
+    metrics = [
+        ("EARLY EXITS", t["exits"], purple),
+        ("WINS", t["wins"], green),
+        ("LOSSES", t["losses"], red),
+        ("UNKNOWN", t["unknown"], muted),
+        ("W/L RATE", win_rate, purple),
+        ("TEAMMATE IMPACTS", t["affected_occurrences"], blue),
+        ("UNIQUE AFFECTED", t["unique_teammates"], blue),
+    ]
+    cell_gap = 10
+    cell_width = (width - 2 * margin - 6 * cell_gap) // 7
+    for i, (label, value, color) in enumerate(metrics):
+        x = margin + i * (cell_width + cell_gap)
+        draw.rounded_rectangle((x, 130, x + cell_width, 265),
+                               radius=12, fill=(36, 44, 68),
+                               outline=(80, 83, 115), width=2)
+        # Use smaller font for long metric labels.
+        label_font = "small"
+        for line_idx, line in enumerate(
+            [label] if len(label) <= 14 else label.split(" ", 1)
+        ):
+            text(fitted(line, cell_width - 16, label_font),
+                 (x + 10, 145 + line_idx * 23),
+                 font=label_font, fill=muted)
+        value_label = str(value)
+        value_font = "metric" if len(value_label) <= 4 else "section"
+        text(value_label, (x + 12, 208), font=value_font, fill=color)
+
+    text("RESULTS AFTER AN EARLY EXIT", (margin, 286), font="bold")
+    draw.rounded_rectangle((473, 291, width - margin, 312),
+                           radius=7, fill=(73, 78, 105))
     if known:
-        win_width=round(966*t["wins"]/known)
-        if win_width:
-            draw.rounded_rectangle((42,272,42+win_width,304),radius=8,fill=(43,172,122))
-        if known-t["wins"]:
-            draw.rectangle((42+win_width,272,1008,304),fill=(211,85,90))
-    draw.text((42,320),f"{t['wins']} wins    {t['losses']} losses    {t['unknown']} unknown",font=normal,fill=subdued)
-    draw.text((42,375),"TEAMMATES AFFECTED",font=medium,fill=fg)
-    rows=sorted(data["affected"].items(),key=lambda kv:(-kv[1]["games"],kv[0]))[:6]
-    max_games=max([r[1]["games"] for r in rows] or [1])
-    for index,(uid,stats) in enumerate(rows):
-        y=422+index*43
-        name=str(data["names"].get(uid,uid))[:22]
-        draw.text((43,y),name,font=normal,fill=fg)
-        draw.rounded_rectangle((335,y+2,920,y+25),radius=6,fill=(43,56,78))
-        bar=int(585*stats["games"]/max_games)
-        if bar:
-            draw.rounded_rectangle((335,y+2,335+bar,y+25),radius=6,fill=(58,166,218))
-        draw.text((935,y),str(stats["games"]),font=normal,fill=fg)
-    if not rows:
-        draw.text((43,433),"No recorded teammate impacts yet",font=normal,fill=subdued)
-    draw.text((42,672),"Affected = recorded on the same team; not proof of causing a loss",font=normal,fill=subdued)
-    output=BytesIO()
-    img.save(output,format="PNG")
+        start, end = 473, width - margin
+        green_span = int((end - start) * t["wins"] / known)
+        if green_span:
+            draw.rectangle((start, 291, start + green_span, 312), fill=green)
+        if green_span < end - start:
+            draw.rectangle((start + green_span, 291, end, 312), fill=red)
+
+    y = section(top_height, "PLAYERS WHO LEFT")
+    y = table(y, ["Player", "Exits", "Wins", "Losses", "Unknown"],
+              shown_players, "exits")
+    y += table_gap
+    y = section(y, "TEAMMATES AFFECTED  (appearances, not blame)")
+    y = table(y, ["Teammate", "Affected", "Wins", "Losses", "Unknown"],
+              shown_impacts, "games")
+    text("Affected = on the same team during an early exit. It does not prove causation.",
+         (margin, y + 36), font="small", fill=muted)
+    output = BytesIO()
+    image.save(output, format="PNG", optimize=True)
     output.seek(0)
     return output
