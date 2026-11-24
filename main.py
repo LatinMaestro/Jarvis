@@ -13512,6 +13512,7 @@ STATS_CHANNELS = {
     "4v4_records": "stats-4v4-records",
     "profile": "stats-profile",
     "season_movie_pack": "stats-season-movie-pack",
+    "early_exit_stats": "stats-early-exits",
 }
 
 
@@ -19279,6 +19280,272 @@ try:
     globals()["_get_all_players"] = _get_all_players_roster_first
 except Exception:
     pass
+
+
+# ======================================================================
+# Early Exit Tracker: imported-match-backed Discord selection and reports
+# ======================================================================
+from jarvis.stats.early_exits import (
+    ensure_tables as _ee_ensure_tables,
+    find_matches as _ee_find_matches,
+    get_match as _ee_get_match,
+    add_exit as _ee_add_exit,
+    remove_exit as _ee_remove_exit,
+    list_exits as _ee_list_exits,
+    summarize as _ee_summarize,
+    format_summary as _ee_format_summary,
+    render_summary as _ee_render_summary,
+)
+
+def _ee_season():
+    return int(get_current_season_id())
+
+def _ee_label(match):
+    return f"Game {match['game_label']} | ID {match['match_uid']}"
+
+def _ee_summarized_name(player):
+    return f"{str(player[1])[:80]} ({player[0]})"
+
+async def _ee_post_stats(channel, guild_id, season_id=None, *, title=None):
+    _ee_ensure_tables(conn)
+    data = _ee_summarize(conn, guild_id, season_id)
+    report_title = title or (f"Season {season_id} Early Exit Report" if season_id is not None else "All-Time Early Exit Report")
+    picture = _ee_render_summary(data, report_title)
+    await channel.send(file=discord.File(fp=picture, filename="early_exit_report.png"))
+    message = _ee_format_summary(data,report_title)
+    # Discord's 2000-character cap; split at boundaries for long rosters.
+    segment = ""
+    for line in message.splitlines():
+        if len(segment)+len(line)+1>1850:
+            await channel.send(segment)
+            segment=""
+        segment += line+"\n"
+    if segment:
+        await channel.send(segment)
+
+async def _ee_refresh_channel(guild):
+    """Refresh only early exits; never clear or recompute other statistics."""
+    if guild is None:
+        return
+    ch = discord.utils.get(guild.text_channels,name="stats-early-exits")
+    if ch is None:
+        return  # run_all_stats will create the channel as normal
+    await _stats_clear_bot_messages(ch,limit=350)
+    await _ee_post_stats(ch,guild.id,_ee_season())
+
+class EarlyExitSelect(discord.ui.Select):
+    def __init__(self, kind, choices):
+        self.kind=kind
+        super().__init__(
+            placeholder={"session":"Select playing session","match":"Select match","player":"Who left this match?"}[kind],
+            min_values=1,max_values=1,
+            options=[discord.SelectOption(label=label[:100],value=str(value)[:100])
+                     for value,label in choices[:25]]
+        )
+
+    async def callback(self,interaction):
+        view=self.view
+        if interaction.user.id != view.owner_id:
+            await interaction.response.send_message("Start your own `!early_exit` selection.",ephemeral=True)
+            return
+        value=self.values[0]
+        try:
+            if self.kind=="session":
+                view.session_key=value
+                view.match_id=None
+                view.player_uid=None
+                view.step="match"
+            elif self.kind=="match":
+                view.match_id=value
+                view.player_uid=None
+                view.step="player"
+            else:
+                view.player_uid=int(value)
+                view.step="confirm"
+            view.populate()
+            await interaction.response.edit_message(content=view.summary(),view=view)
+        except Exception as e:
+            await interaction.response.send_message(f"Unable to select: {type(e).__name__}.",ephemeral=True)
+
+class EarlyExitView(discord.ui.View):
+    def __init__(self,guild_id,owner_id,season_id=None,match_uid=None):
+        super().__init__(timeout=300)
+        self.guild_id=guild_id
+        self.owner_id=owner_id
+        self.season_id=int(season_id if season_id is not None else _ee_season())
+        self.match_id=str(match_uid) if match_uid is not None else None
+        self.session_key=None
+        self.player_uid=None
+        self.step="player" if self.match_id is not None else "session"
+        self.populate()
+
+    def summary(self):
+        if self.step=="session":
+            return f"**Early Exit — Season {self.season_id}**\nSelect the playing session:"
+        if self.step=="match":
+            return f"**Early Exit — {self.session_key}**\nSelect the recorded game:"
+        match=_ee_get_match(conn,self.season_id,self.match_id)
+        if not match:
+            return "Match no longer available in Jarvis."
+        if self.step=="player":
+            return f"**Early Exit — {_ee_label(match)}**\nSelect the departing player:"
+        player=next((p for p in match["players"] if int(p[0])==self.player_uid),None)
+        if not player:
+            return "Player not found in this match."
+        other=[p[1] for p in match["players"] if p[0]!=player[0] and p[2] is not None and player[2] is not None and p[2]==player[2]]
+        result="Win" if player[3]==1 else "Loss" if player[3]==0 else "Unknown"
+        names=", ".join(other) if other else "Not verified"
+        return (f"**Confirm Early Exit**\nSeason {self.season_id} • {_ee_label(match)}\n"
+                f"**Player:** {player[1]}\n**Result:** {result}\n**Teammates:** {names}\n"
+                "No reason or exit timing recorded. The result and teammates come from imported match data.")
+
+    def populate(self):
+        self.clear_items()
+        if self.step=="session":
+            ordered,grouped=_get_games_grouped_by_date_api(self.season_id)
+            if not ordered:
+                return
+            self._sessions=grouped
+            self.add_item(EarlyExitSelect("session",[(date,f"{date} ({len(grouped[date])} games)") for date in reversed(ordered)]))
+        elif self.step=="match":
+            labels=self._sessions.get(self.session_key,[])
+            choices=[]
+            for label in labels:
+                row=c.execute("SELECT match_uid FROM mr_match_meta WHERE season_id=? AND game_label=?",
+                              (self.season_id,str(label))).fetchone()
+                if row:
+                    choices.append((str(row[0]),f"Game {label} — Match {row[0]}"))
+            if choices:
+                self.add_item(EarlyExitSelect("match",choices))
+        elif self.step=="player":
+            match=_ee_get_match(conn,self.season_id,self.match_id)
+            if match and match["players"]:
+                self.add_item(EarlyExitSelect("player",[(p[0],_ee_summarized_name(p)) for p in match["players"]]))
+        elif self.step=="confirm":
+            self.add_item(self.confirm)
+        self.add_item(self.cancel)
+
+    @discord.ui.button(label="Save Early Exit",style=discord.ButtonStyle.success,row=1)
+    async def confirm(self,interaction:discord.Interaction,button:discord.ui.Button):
+        if interaction.user.id!=self.owner_id:
+            await interaction.response.send_message("This selection belongs to another user.",ephemeral=True)
+            return
+        if self.step!="confirm" or self.player_uid is None:
+            await interaction.response.send_message("Select a match and player first.",ephemeral=True)
+            return
+        status=_ee_add_exit(conn,self.guild_id,self.season_id,self.match_id,self.player_uid,interaction.user.id)
+        if status!="saved":
+            await interaction.response.send_message(
+                "Already recorded for this player and match." if status=="duplicate"
+                else "Match/player no longer found. Nothing recorded.",ephemeral=True)
+            return
+        self.stop()
+        await interaction.response.edit_message(content="✅ Early exit recorded. "+self.summary(),view=None)
+        try:
+            await _ee_refresh_channel(interaction.guild)
+        except Exception:
+            pass
+
+    @discord.ui.button(label="Cancel",style=discord.ButtonStyle.secondary,row=1)
+    async def cancel(self,interaction:discord.Interaction,button:discord.ui.Button):
+        if interaction.user.id!=self.owner_id:
+            await interaction.response.send_message("This selection belongs to another user.",ephemeral=True)
+            return
+        self.stop()
+        await interaction.response.edit_message(content="Early exit cancelled.",view=None)
+
+@bot.command(name="early_exit")
+async def early_exit(ctx):
+    if not ctx.guild:
+        await ctx.send("Use this command in a server.")
+        return
+    ensure_mr_api_tables()
+    view=EarlyExitView(ctx.guild.id,ctx.author.id)
+    if not any(isinstance(item,EarlyExitSelect) for item in view.children):
+        await ctx.send("No imported games found this season. Import matches or use `!early_exit_match <match_id>`.")
+        return
+    await ctx.send(view.summary(),view=view)
+
+@bot.command(name="early_exit_match")
+async def early_exit_match(ctx,match_id:str):
+    if not ctx.guild:
+        await ctx.send("Use this command in a server.")
+        return
+    ensure_mr_api_tables()
+    matches=_ee_find_matches(conn,match_id)
+    if not matches:
+        await ctx.send("Match ID not found in Jarvis. Import that game first.")
+        return
+    if len(matches)!=1:
+        await ctx.send("Match ID exists in multiple seasons. Use `!early_exit` to select the appropriate season/session.")
+        return
+    sid=int(matches[0][0])
+    view=EarlyExitView(ctx.guild.id,ctx.author.id,season_id=sid,match_uid=match_id)
+    if not any(isinstance(item,EarlyExitSelect) for item in view.children):
+        await ctx.send("This imported match has no verified human player records.")
+        return
+    await ctx.send(view.summary(),view=view)
+
+@bot.command(name="early_exit_stats")
+async def early_exit_stats(ctx,scope:str="season"):
+    if not ctx.guild:
+        await ctx.send("Use this command in a server.")
+        return
+    if scope.lower() not in ("season","all"):
+        await ctx.send("Usage: `!early_exit_stats` or `!early_exit_stats all`")
+        return
+    await _ee_post_stats(ctx.channel,ctx.guild.id,None if scope.lower()=="all" else _ee_season())
+
+@bot.command(name="early_exit_list")
+async def early_exit_list(ctx,scope:str="season"):
+    if not ctx.guild:
+        await ctx.send("Use this command in a server.")
+        return
+    if scope.lower() not in ("season","all"):
+        await ctx.send("Usage: `!early_exit_list` or `!early_exit_list all`")
+        return
+    rows=_ee_list_exits(conn,ctx.guild.id,None if scope.lower()=="all" else _ee_season(),limit=40)
+    if not rows:
+        await ctx.send("No early exits recorded.")
+        return
+    names={}
+    for sid,mid,uid,author,ts,label in rows:
+        row=c.execute("SELECT player FROM mr_player_match WHERE season_id=? AND match_uid=? AND player_uid=?",
+                      (sid,mid,uid)).fetchone()
+        names[(sid,mid,uid)]=row[0] if row else str(uid)
+    lines=[f"**Early Exits — {scope}**"]
+    for sid,mid,uid,author,ts,label in rows:
+        line=f"• S{sid} game {label} | Match `{mid}` | {names[(sid,mid,uid)]} ({uid})"
+        if len("\n".join(lines+[line]))>1850:
+            await ctx.send("\n".join(lines))
+            lines=["**Early Exits (continued)**"]
+        lines.append(line)
+    await ctx.send("\n".join(lines))
+
+@bot.command(name="early_exit_remove")
+async def early_exit_remove(ctx,match_id:str,player_uid:int=None):
+    if not ctx.guild:
+        await ctx.send("Use this command in a server.")
+        return
+    _ee_ensure_tables(conn)
+    matches=_ee_list_exits(conn,ctx.guild.id,None,limit=1000000)
+    candidates=[entry for entry in matches if str(entry[1])==str(match_id)
+                and (player_uid is None or int(entry[2])==player_uid)]
+    if len(candidates)!=1:
+        await ctx.send("Specify a unique recorded match and player UID: `!early_exit_remove <match_id> <player_uid>`. Use `!early_exit_list all` to look up records.")
+        return
+    sid,mid,uid,recorded_by,*_=candidates[0]
+    if recorded_by!=ctx.author.id and not ctx.author.guild_permissions.administrator:
+        await ctx.send("Only the person who recorded this exit or an administrator may remove it.")
+        return
+    removed=_ee_remove_exit(conn,ctx.guild.id,sid,mid,uid)
+    await ctx.send("✅ Early exit removed." if removed else "No matching early exit.")
+    if removed:
+        try:
+            await _ee_refresh_channel(ctx.guild)
+        except Exception:
+            pass
+
 
 if __name__ == "__main__":
     # Replit-style keep-alive/web monitor is optional. On DigitalOcean, leave
