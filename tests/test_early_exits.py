@@ -1,5 +1,6 @@
 import sqlite3
 import unittest
+from PIL import Image
 
 from jarvis.stats.early_exits import (
     add_exit, ensure_tables, find_matches, format_summary, get_match,
@@ -70,6 +71,31 @@ class EarlyExitTests(unittest.TestCase):
         add_exit(self.db,99,11,"100",1,777)
         totals=summarize(self.db,99)["total"]
         self.assertEqual((totals["wins"],totals["losses"],totals["unknown"]),(0,0,1))
+
+    def test_image_includes_both_tables_and_scales_with_record_count(self):
+        add_exit(self.db, 99, 11, "100", 1, 777)
+        report = summarize(self.db, 99)
+        image = Image.open(render_summary(report, "Season 11 Early Exit Report"))
+        self.assertEqual(image.size[0], 1200)
+        # One departing player and one affected teammate must have a table row.
+        self.assertGreaterEqual(image.size[1], 800)
+
+        # A longer player list must increase height instead of truncating rows.
+        enlarged = summarize(self.db, 99)
+        enlarged["by_player"] = {
+            uid: {"exits": 1, "wins": 0, "losses": 1, "unknown": 0}
+            for uid in range(1, 31)
+        }
+        enlarged["affected"] = {
+            uid: {"games": 1, "wins": 0, "losses": 1, "unknown": 0}
+            for uid in range(40, 70)
+        }
+        enlarged["names"] = {
+            uid: "PlayerWithAnExtremelyLongUsernameWhichMustFit"
+            for uid in list(enlarged["by_player"]) + list(enlarged["affected"])
+        }
+        large_image = Image.open(render_summary(enlarged, "Season 11 Early Exit Report"))
+        self.assertGreater(large_image.size[1], image.size[1] + 2000)
 
     def test_image_is_valid_png(self):
         buf=render_summary(summarize(self.db,99),"Season 11 Early Exit Report")
