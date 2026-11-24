@@ -161,7 +161,7 @@ def format_summary(data, title):
 
 def render_summary(data, title):
     """Render a complete Discord-ready report with two readable tables."""
-    width, margin, row_height = 1200, 42, 57
+    width, margin, row_height = 1200, 42, 72
     player_rows = sorted(
         data["by_player"].items(), key=lambda item: (-item[1]["exits"], item[0])
     )
@@ -171,9 +171,9 @@ def render_summary(data, title):
     # Show every row (instead of hiding remaining people in an image-only report).
     shown_players = player_rows or [(None, None)]
     shown_impacts = impact_rows or [(None, None)]
-    top_height = 300
-    section_heading = 69
-    table_header = 60
+    top_height = 320
+    section_heading = 78
+    table_header = 76
     table_gap = 43
     footer_height = 28
     height = (
@@ -187,16 +187,23 @@ def render_summary(data, title):
     draw = ImageDraw.Draw(image)
     try:
         fonts = {
-            "title": ImageFont.truetype("DejaVuSans-Bold.ttf", 40),
-            "section": ImageFont.truetype("DejaVuSans-Bold.ttf", 29),
-            "metric": ImageFont.truetype("DejaVuSans-Bold.ttf", 42),
-            "normal": ImageFont.truetype("DejaVuSans.ttf", 23),
-            "bold": ImageFont.truetype("DejaVuSans-Bold.ttf", 24),
-            "small": ImageFont.truetype("DejaVuSans.ttf", 20),
+            "title": ImageFont.truetype("DejaVuSans-Bold.ttf", 49),
+            "section": ImageFont.truetype("DejaVuSans-Bold.ttf", 36),
+            "metric": ImageFont.truetype("DejaVuSans-Bold.ttf", 56),
+            "normal": ImageFont.truetype("DejaVuSans.ttf", 29),
+            "bold": ImageFont.truetype("DejaVuSans-Bold.ttf", 30),
+            "small": ImageFont.truetype("DejaVuSans.ttf", 25),
         }
     except OSError:
-        fonts = {key: ImageFont.load_default() for key in
-                 ("title", "section", "metric", "normal", "bold", "small")}
+        # Pillow 11+ includes a scalable fallback. The old no-size default
+        # rendered everything at about 10px on hosts without DejaVu fonts.
+        fonts = {
+            key: ImageFont.load_default(size=size)
+            for key, size in {
+                "title": 49, "section": 36, "metric": 56,
+                "normal": 29, "bold": 30, "small": 25,
+            }.items()
+        }
 
     fg = (242, 245, 251)
     muted = (175, 188, 210)
@@ -220,10 +227,10 @@ def render_summary(data, title):
 
     def section(y, label):
         draw.rounded_rectangle(
-            (margin, y, width - margin, y + 53),
+            (margin, y, width - margin, y + 62),
             radius=11, fill=(37, 43, 73), outline=(100, 86, 159), width=2
         )
-        draw.rounded_rectangle((margin, y, margin + 8, y + 53),
+        draw.rounded_rectangle((margin, y, margin + 8, y + 62),
                                radius=4, fill=purple)
         text(label, (margin + 24, y + 9), font="section")
         return y + section_heading
@@ -234,7 +241,7 @@ def render_summary(data, title):
                                radius=9, fill=(44, 49, 77))
         for i, label in enumerate(headings):
             x = columns[i] + 16 if i == 0 else columns[i] + 12
-            text(label, (x, y + 16), font="bold",
+            text(label, (x, y + 21), font="bold",
                  fill=purple if i == 0 else fg)
         y += table_header
         for index, (uid, details) in enumerate(rows):
@@ -243,7 +250,7 @@ def render_summary(data, title):
                 fill=(24, 32, 53) if index % 2 == 0 else (33, 39, 62)
             )
             if uid is None:
-                text("No records yet", (margin + 17, y + 14), fill=muted)
+                text("No records yet", (margin + 17, y + 20), fill=muted)
             else:
                 name = data["names"].get(uid, str(uid))
                 values = [
@@ -252,15 +259,15 @@ def render_summary(data, title):
                 ]
                 for col, value in enumerate(values):
                     fill = (green if col == 2 else red if col == 3 else fg)
-                    text(value, (columns[col] + 16, y + 13),
+                    text(value, (columns[col] + 16, y + 18),
                          font="bold", fill=fill)
             y += row_height
             draw.line((margin, y, width - margin, y), fill=(65, 71, 102), width=1)
         return y
 
-    text(title, (margin, 30), font="title")
+    text(title, (margin, 21), font="title")
     text("EARLY EXIT STATISTICS  /  MATCH RESULTS & TEAMMATE EXPOSURE",
-         (margin, 88), font="small", fill=muted)
+         (margin, 95), font="small", fill=muted)
     t = data["total"]
     # Only the three headline metrics requested for the Discord image.
     metrics = [
@@ -272,7 +279,7 @@ def render_summary(data, title):
     cell_width = (width - 2 * margin - 2 * cell_gap) // 3
     for i, (label, value, color) in enumerate(metrics):
         x = margin + i * (cell_width + cell_gap)
-        draw.rounded_rectangle((x, 130, x + cell_width, 245),
+        draw.rounded_rectangle((x, 143, x + cell_width, 276),
                                radius=12, fill=(36, 44, 68),
                                outline=(80, 83, 115), width=2)
         # Use smaller font for long metric labels.
@@ -281,11 +288,11 @@ def render_summary(data, title):
             [label] if len(label) <= 14 else label.split(" ", 1)
         ):
             text(fitted(line, cell_width - 16, label_font),
-                 (x + 10, 145 + line_idx * 23),
+                 (x + 16, 156 + line_idx * 30),
                  font=label_font, fill=muted)
         value_label = str(value)
         value_font = "metric" if len(value_label) <= 4 else "section"
-        text(value_label, (x + 12, 184), font=value_font, fill=color)
+        text(value_label, (x + 16, 208), font=value_font, fill=color)
 
     y = section(top_height, "PLAYERS WHO LEFT")
     y = table(y, ["Player", "Exits", "Wins", "Losses"],
