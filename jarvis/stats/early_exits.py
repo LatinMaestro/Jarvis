@@ -171,11 +171,11 @@ def render_summary(data, title):
     # Show every row (instead of hiding remaining people in an image-only report).
     shown_players = player_rows or [(None, None)]
     shown_impacts = impact_rows or [(None, None)]
-    top_height = 340
+    top_height = 300
     section_heading = 69
     table_header = 60
     table_gap = 43
-    footer_height = 96
+    footer_height = 28
     height = (
         top_height
         + section_heading + table_header + len(shown_players) * row_height
@@ -228,7 +228,7 @@ def render_summary(data, title):
         text(label, (margin + 24, y + 9), font="section")
         return y + section_heading
 
-    columns = [margin, 492, 674, 837, 1000, width - margin]
+    columns = [margin, 556, 752, 952, width - margin]
     def table(y, headings, rows, first_key):
         draw.rounded_rectangle((margin, y, width - margin, y + table_header),
                                radius=9, fill=(44, 49, 77))
@@ -248,8 +248,7 @@ def render_summary(data, title):
                 name = data["names"].get(uid, str(uid))
                 values = [
                     fitted(name, columns[1] - columns[0] - 30, "bold"),
-                    details[first_key], details["wins"],
-                    details["losses"], details["unknown"]
+                    details[first_key], details["wins"], details["losses"]
                 ]
                 for col, value in enumerate(values):
                     fill = (green if col == 2 else red if col == 3 else fg)
@@ -263,22 +262,17 @@ def render_summary(data, title):
     text("EARLY EXIT STATISTICS  /  MATCH RESULTS & TEAMMATE EXPOSURE",
          (margin, 88), font="small", fill=muted)
     t = data["total"]
-    known = t["wins"] + t["losses"]
-    win_rate = f"{t['wins'] / known * 100:.1f}%" if known else "N/A"
+    # Only the three headline metrics requested for the Discord image.
     metrics = [
         ("EARLY EXITS", t["exits"], purple),
         ("WINS", t["wins"], green),
         ("LOSSES", t["losses"], red),
-        ("UNKNOWN", t["unknown"], muted),
-        ("W/L RATE", win_rate, purple),
-        ("TEAMMATE IMPACTS", t["affected_occurrences"], blue),
-        ("UNIQUE AFFECTED", t["unique_teammates"], blue),
     ]
-    cell_gap = 10
-    cell_width = (width - 2 * margin - 6 * cell_gap) // 7
+    cell_gap = 15
+    cell_width = (width - 2 * margin - 2 * cell_gap) // 3
     for i, (label, value, color) in enumerate(metrics):
         x = margin + i * (cell_width + cell_gap)
-        draw.rounded_rectangle((x, 130, x + cell_width, 265),
+        draw.rounded_rectangle((x, 130, x + cell_width, 245),
                                radius=12, fill=(36, 44, 68),
                                outline=(80, 83, 115), width=2)
         # Use smaller font for long metric labels.
@@ -291,28 +285,15 @@ def render_summary(data, title):
                  font=label_font, fill=muted)
         value_label = str(value)
         value_font = "metric" if len(value_label) <= 4 else "section"
-        text(value_label, (x + 12, 208), font=value_font, fill=color)
-
-    text("RESULTS AFTER AN EARLY EXIT", (margin, 286), font="bold")
-    draw.rounded_rectangle((473, 291, width - margin, 312),
-                           radius=7, fill=(73, 78, 105))
-    if known:
-        start, end = 473, width - margin
-        green_span = int((end - start) * t["wins"] / known)
-        if green_span:
-            draw.rectangle((start, 291, start + green_span, 312), fill=green)
-        if green_span < end - start:
-            draw.rectangle((start + green_span, 291, end, 312), fill=red)
+        text(value_label, (x + 12, 184), font=value_font, fill=color)
 
     y = section(top_height, "PLAYERS WHO LEFT")
-    y = table(y, ["Player", "Exits", "Wins", "Losses", "Unknown"],
+    y = table(y, ["Player", "Exits", "Wins", "Losses"],
               shown_players, "exits")
     y += table_gap
-    y = section(y, "TEAMMATES AFFECTED  (appearances, not blame)")
-    y = table(y, ["Teammate", "Affected", "Wins", "Losses", "Unknown"],
+    y = section(y, "TEAMMATES AFFECTED")
+    y = table(y, ["Teammate", "Affected", "Wins", "Losses"],
               shown_impacts, "games")
-    text("Affected = on the same team during an early exit. It does not prove causation.",
-         (margin, y + 36), font="small", fill=muted)
     output = BytesIO()
     image.save(output, format="PNG", optimize=True)
     output.seek(0)
