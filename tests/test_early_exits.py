@@ -1,7 +1,8 @@
 import inspect
 import sqlite3
 import unittest
-from PIL import Image
+from unittest.mock import patch
+from PIL import Image, ImageFont
 
 from jarvis.stats.early_exits import (
     add_exit, ensure_tables, find_matches, format_summary, get_match,
@@ -112,6 +113,28 @@ class EarlyExitTests(unittest.TestCase):
         self.assertNotIn('"Unknown"', renderer)
         # Backend still keeps unknown results for accurate accounting.
         self.assertIn("unknown", summarize(self.db, 99)["total"])
+
+    def test_missing_dejavu_fonts_keep_large_readable_text(self):
+        # Production hosts may not install DejaVu; the previous fallback
+        # silently shrank all labels to Pillow's tiny default 10px font.
+        original = ImageFont.truetype
+
+        def missing_dejavu(font, size, *args, **kwargs):
+            if isinstance(font, str) and font.startswith("DejaVuSans"):
+                raise OSError("DejaVu not installed")
+            return original(font, size, *args, **kwargs)
+
+        with patch("jarvis.stats.early_exits.ImageFont.truetype",
+                   side_effect=missing_dejavu):
+            image = Image.open(render_summary(
+                summarize(self.db, 99), "Season 11 Early Exit Report"
+            )).convert("RGB")
+        self.assertEqual(image.width, 1200)
+        # The heading must occupy many pixels, rather than 10px glyphs.
+        title_area = image.crop((42, 21, 900, 85))
+        background = (15, 22, 39)
+        changed = sum(1 for pixel in title_area.getdata() if pixel != background)
+        self.assertGreater(changed, 1200)
 
     def test_image_is_valid_png(self):
         buf=render_summary(summarize(self.db,99),"Season 11 Early Exit Report")
