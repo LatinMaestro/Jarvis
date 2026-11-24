@@ -31,7 +31,7 @@ class EarlyExitTests(unittest.TestCase):
         self.db.close()
 
     def test_match_lookup_and_human_participation(self):
-        self.assertEqual(get_match(self.db,11,"100")["players"][0][0],3)
+        self.assertEqual({p[0] for p in get_match(self.db,11,"100")["players"]}, {1,2,3})
         self.assertEqual(len(get_match(self.db,11,"100")["players"]),3)
         self.assertEqual(len(find_matches(self.db,"100")),1)
 
