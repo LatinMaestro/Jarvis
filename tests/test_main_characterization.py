@@ -159,6 +159,12 @@ class MainCharacterizationTests(unittest.TestCase):
             "stats-teammate-role-bans",
         )
 
+    def test_season_story_versatility_requires_five_minutes_per_hero(self):
+        source = (ROOT / "main.py").read_text(encoding="utf-8-sig")
+        self.assertIn("SS_VERSATILITY_MIN_HERO_SECONDS = 300", source)
+        self.assertIn("HAVING sec_elig >= ?", source)
+        self.assertIn("int(SS_VERSATILITY_MIN_HERO_SECONDS)", source)
+
     def test_next_teams_visible_message_format_is_preserved(self):
         source = (ROOT / "main.py").read_text(encoding="utf-8-sig")
         expected_fragments = (
